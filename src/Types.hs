@@ -1,103 +1,135 @@
--- Accomponying implementation for notes on Information-Flow Basics.
--- aslan@cs.au.dk
-
--- Type-based enforcement of NI
--- in the style of Volpano, Smith, Irvine
--- (aka Denning-style enforcement)
-
--- CHANGELOG:
--- 2016-04-07: Initial implementation closely matching Sec 3 of the notes
--- 2026-04-19: Cleanup, better error messages, removed MissingH dependency
-
 module Types where
+
 import Imp
 import Data.List (isSuffixOf)
+import qualified Data.Map as Map
 
-data Level = Public | Secret deriving (Eq, Show)
+-- Standard levels
+public = L "public"
+secret = L "secret"
 
---
+-- Lattice representation
+-- For simplicity, we define the partial order and join explicitly
+data Lattice = Lattice {
+    levels :: [Level],
+    flows  :: [(Level, Level)], -- (a, b) means a ⊑ b
+    joins  :: Map.Map (Level, Level) Level
+}
 
-flowsto :: Level -> Level -> Bool
-flowsto Secret Public = False
-flowsto _ _ = True
+-- Initial lattice with Public ⊑ Secret
+stdLattice :: Lattice
+stdLattice = Lattice {
+    levels = [public, secret],
+    flows  = [(public, public), (public, secret), (secret, secret)],
+    joins  = Map.fromList [
+        ((public, public), public),
+        ((public, secret), secret),
+        ((secret, public), secret),
+        ((secret, secret), secret)
+    ]
+}
 
-join :: Level -> Level -> Level
-join Public Public = Public
-join _ _     = Secret
+-- Lattice operations using the provided lattice
+flowsto :: Lattice -> Level -> Level -> Bool
+flowsto lat a b = (a, b) `elem` flows lat
 
--- convenient synonyms
+join :: Lattice -> Level -> Level -> Level
+join lat a b = case Map.lookup (a, b) (joins lat) of
+    Just l -> l
+    Nothing -> error $ "Join not defined for " ++ show a ++ " and " ++ show b
+
+-- convenient synonyms (implicitly using stdLattice)
 (⊔) :: Level -> Level -> Level
-(⊔) = join
+(⊔) = join stdLattice
 
 (⊑) :: Level -> Level -> Bool
-(⊑) = flowsto
+(⊑) = flowsto stdLattice
 
---
-
+-- Flow-sensitive environment
 type Environment = VarName -> Level
+
+-- update environment
+updateEnv :: Environment -> VarName -> Level -> Environment
+updateEnv env x l y = if y == x then l else env y
+
+-- join two environments
+joinEnv :: Environment -> Environment -> Environment
+joinEnv env1 env2 x = join stdLattice (env1 x) (env2 x)
+
+-- check if one environment is more restrictive than another (env1 ⊑ env2)
+envFlowsTo :: [VarName] -> Environment -> Environment -> Bool
+envFlowsTo vars env1 env2 = all (\x -> flowsto stdLattice (env1 x) (env2 x)) vars
+
 
 -- Expression Typing
 exprType :: Environment -> Expr -> Level
-exprType _   (IntExpr _ ) = Public
+exprType _   (IntExpr _ ) = public
 exprType env (VarExpr x ) = env x
 exprType env (BinOpExpr _ e1 e2) =
-    join (exprType env e1) (exprType env e2)
+    join stdLattice (exprType env e1) (exprType env e2)
 
--- We record the result of type checking a command
--- as a value of type TypeRes
-data TypeRes = WellTyped | TypeError String
-  deriving (Eq, Show)
+-- Type result now returns the new environment
+data TypeRes = WellTyped Environment | TypeError String
 
--- Command Typing
-cmdType :: Environment -> Level -> Cmd -> TypeRes
+-- Command Typing (Flow-sensitive)
+cmdType :: [VarName] -> Environment -> Level -> Cmd -> TypeRes
 
-cmdType _Γ pc Skip = WellTyped
+cmdType _ env _ Skip = WellTyped env
 
-cmdType _Γ pc (Assign x e) =
-    let ℓ = exprType _Γ e
-     in if not (pc ⊑ _Γ x)
-          then TypeError $ "assignment to " ++ x ++ " failed: program counter level is more restrictive than variable level"
-          else if not (ℓ ⊑ _Γ x)
-                 then TypeError $ "assignment to " ++ x ++ " failed: expression level is more restrictive than variable level"
-                 else WellTyped
+cmdType _ env pc (Assign x e) =
+    let l = exprType env e
+        l' = pc ⊔ l
+    in WellTyped (updateEnv env x l')
 
-cmdType _Γ pc (Seq c1 c2) =
-    case cmdType _Γ pc c1 of
-        WellTyped         -> cmdType _Γ pc c2
-        err               -> err
+cmdType vars env pc (Seq c1 c2) =
+    case cmdType vars env pc c1 of
+        WellTyped env' -> cmdType vars env' pc c2
+        err            -> err
 
-cmdType _Γ pc (If e c1 c2) =
-    let ℓ   = exprType _Γ e
-        pc' = pc ⊔ ℓ
-     in case cmdType _Γ pc' c1 of
-          WellTyped -> cmdType _Γ pc' c2
-          err       -> err
+cmdType vars env pc (If e c1 c2) =
+    let l = exprType env e
+        pc' = pc ⊔ l
+    in case cmdType vars env pc' c1 of
+        WellTyped env1' -> case cmdType vars env pc' c2 of
+            WellTyped env2' -> WellTyped (joinEnv env1' env2')
+            err -> err
+        err -> err
 
-cmdType _Γ pc (While e c) =
-  let ℓ   = exprType _Γ e
-      pc' = pc ⊔ ℓ
-   in cmdType _Γ pc' c
+cmdType vars env pc (While e c) =
+    let l = exprType env e
+        pc' = pc ⊔ l
+    in case cmdType vars env pc' c of
+        WellTyped env' ->
+            if envFlowsTo vars env' env -- Γ' ⊑ Γ
+               then WellTyped env
+               else TypeError "While loop body changes environment unpredictably"
+        err -> err
 
--- For Haskell affectionados: TypeRes is a monad
--- and we could have rewritten the code in a way that
--- burries error checking into bind, but we explicitly
--- don't want to go there, for illustration purposes
---
+cmdType vars env pc (Input ch x) =
+    if not (pc ⊑ ch)
+    then TypeError $ "Input failed: pc (" ++ show pc ++ ") does not flow to channel (" ++ show ch ++ ")"
+    else WellTyped (updateEnv env x (ch ⊔ pc))
+
+cmdType vars env pc (Output ch e) =
+    let l = exprType env e
+    in if not ((pc ⊔ l) ⊑ ch)
+    then TypeError $ "Output failed: pc ⊔ expr (" ++ show (pc ⊔ l) ++ ") does not flow to channel (" ++ show ch ++ ")"
+    else WellTyped env
+
+cmdType _ env _ Stop = WellTyped env
+
 
 -- EXAMPLES
 
--- Use naming convention to assign levels
 levelFromName :: VarName -> Level
 levelFromName x =
    if "_p" `isSuffixOf` x
-        then Public
-        else Secret
+        then public
+        else secret
 
--- Initial environment where all variables are Secret by default
 allSecretEnv :: Environment
-allSecretEnv _ = Secret
+allSecretEnv _ = secret
 
--- Initialize environment based on variable names
 initEnv :: [VarName] -> Environment
 initEnv vars =
-  foldl (\env var -> update env var (levelFromName var)) allSecretEnv vars
+  foldl (\env var -> updateEnv env var (levelFromName var)) allSecretEnv vars

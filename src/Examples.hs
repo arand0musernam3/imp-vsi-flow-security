@@ -36,29 +36,36 @@ example4 = "if y_s then x_p := 1 else x_p := 0"
 exercise2 :: String
 exercise2 = "while y_s do skip"
 
+-- PDF Example 1 (Rejected)
+pdfExample1 :: String
+pdfExample1 = "input(secret, x); y := 0; if x then {output(public, y)} else output(public, y)"
+
+-- PDF Example 2 (Rejected)
+pdfExample2 :: String
+pdfExample2 = "input(secret, x); y := 0; if x then output(public, y) else skip"
+
 ---
 -- Helper functions to run programs
 
 varsOfInterest :: [VarName]
-varsOfInterest = ["x_p", "y_s"] 
+varsOfInterest = ["x_p", "y_s", "x", "y"] 
 
 -- Run program for at most 100 steps
+-- Updated Configuration for I/O
 run100 :: Configuration -> IO ()
-run100 = runF 100 varsOfInterest -- obs: fuel argument of 100 steps hardcoded
+run100 = runF 100 varsOfInterest
 
 checkWithVarsOfInterest :: Cmd -> TypeRes
-checkWithVarsOfInterest = cmdType (initEnv varsOfInterest) Public
+checkWithVarsOfInterest = cmdType varsOfInterest (initEnv varsOfInterest) public
 
 runTyped :: Cmd -> Memory -> IO ()
 runTyped p m = do 
   case checkWithVarsOfInterest p of 
-    WellTyped -> run100 (p, m)
+    WellTyped _env' -> run100 (p, m, [], [])
     TypeError msg -> print msg
 
 runUntyped :: Cmd -> Memory -> IO ()
-runUntyped p m = run100 (p, m)
-
--- Parse a program from a string and run it (typed or untyped)
+runUntyped p m = run100 (p, m, [], [])
 
 runStringTyped :: String -> Memory -> IO ()
 runStringTyped s m = case parseImp s of

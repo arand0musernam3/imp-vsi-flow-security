@@ -16,8 +16,9 @@ lexer = Token.makeTokenParser style
       { Token.commentStart    = "/*"
       , Token.commentEnd      = "*/"
       , Token.commentLine     = "//"
-      , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop"]
-      , Token.reservedOpNames = [":=", "+", "-", "*", ";"]
+      , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop",
+                                 "input", "output"]
+      , Token.reservedOpNames = [":=", "+", "-", "*", ";", ","]
       }
 
 integer    = Token.integer lexer
@@ -27,7 +28,13 @@ reservedOp = Token.reservedOp lexer
 parens     = Token.parens lexer
 braces     = Token.braces lexer
 semi       = Token.semi lexer
+comma      = Token.comma lexer
 whiteSpace = Token.whiteSpace lexer
+
+-- Level Parser
+-- We allow any identifier to be a level, but we specifically match common ones
+level :: Parser Level
+level = L <$> identifier
 
 -- Expression Parser
 expression :: Parser Expr
@@ -48,23 +55,28 @@ command = semiSep1 statement >>= return . foldl1 Seq
 statement :: Parser Cmd
 statement =  (reserved "skip" >> return Skip)
          <|> (reserved "stop" >> return Stop)
+         <|> (reserved "input" >> parens (do
+                l <- level
+                comma
+                Input l <$> identifier))
+         <|> (reserved "output" >> parens (do
+                l <- level
+                comma
+                Output l <$> expression))
          <|> (reserved "if" >> do
                 cond <- expression
                 reserved "then"
                 c1 <- commandBlock
                 reserved "else"
-                c2 <- commandBlock
-                return (If cond c1 c2))
+                If cond c1 <$> commandBlock)
          <|> (reserved "while" >> do
                 cond <- expression
                 reserved "do"
-                c <- commandBlock
-                return (While cond c))
+                While cond <$> commandBlock)
          <|> (do
                 var <- identifier
                 reservedOp ":="
-                expr <- expression
-                return (Assign var expr))
+                Assign var <$> expression)
 
 commandBlock :: Parser Cmd
 commandBlock = braces command <|> parens command <|> statement

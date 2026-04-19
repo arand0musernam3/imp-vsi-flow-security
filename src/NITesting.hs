@@ -1,13 +1,10 @@
 module NITesting where
 
--- Acknowledgment: Mathias Pedersen
---
-
 import Imp
-
+import Types
 
 import Control.Monad
-import Test.QuickCheck       -- cabal install quickcheck
+import Test.QuickCheck
 import Test.QuickCheck.Monadic
 
 instance Arbitrary BinOp
@@ -21,7 +18,7 @@ idExprGen = do i <- allowedIdsGen
                return (VarExpr i)
 
 
-constExprGen = do k <- choose (0,4)  -- our constanst go between 0 and 4
+constExprGen = do k <- choose (0,4)
                   return $ IntExpr k
 
 
@@ -50,6 +47,15 @@ assignGen = do
     exp <- arbitrary
     return $ Assign var exp
 
+inputGen = do
+    var <- allowedIdsGen
+    l <- elements [L "public", L "secret"]
+    return $ Input l var
+
+outputGen = do
+    l <- elements [L "public", L "secret"]
+    e <- arbitrary
+    return $ Output l e
 
 ifGen 0 = error "should not be called"
 ifGen n = do
@@ -74,7 +80,7 @@ skipGen = return Skip
 
 stmtExprGen 0 = return Skip
 stmtExprGen n | n > 0 = frequency
-   [ (1, assignGen), (1, ifGen n), (1, whileGen n), (1, seqGen n), (1, skipGen)]
+   [ (2, assignGen), (1, inputGen), (1, outputGen), (1, ifGen n), (1, whileGen n), (1, seqGen n), (1, skipGen)]
 
 
 
@@ -90,6 +96,8 @@ instance Arbitrary Cmd where
   shrink (If e c1 c2) = [c1, c2] ++ [ If e' c1 c2 | e' <- shrink e]
                                  ++ [ If e c1' c2 | c1' <- shrink c1]
                                  ++ [ If e c1 c2' | c2' <- shrink c2]
+  shrink (Input l x) = [Skip]
+  shrink (Output l e) = [Skip] ++ [ Output l e' | e' <- shrink e]
   shrink _ = []
 
 
