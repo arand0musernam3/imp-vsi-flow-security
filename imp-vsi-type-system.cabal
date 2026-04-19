@@ -16,6 +16,6 @@ extra-source-files:  README.md
 executable imp-vsi-type-system
   hs-source-dirs:      src
   main-is:             Main.hs
-  other-modules:       Imp, Examples, Types
+  other-modules:       Imp, Examples, Types, Parser
   default-language:    Haskell2010
-  build-depends:       base >= 4.7 && < 5
+  build-depends:       base >= 4.7 && < 5, parsec
