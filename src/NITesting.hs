@@ -13,7 +13,7 @@ import Test.QuickCheck.Monadic
 instance Arbitrary BinOp
   where arbitrary = elements [ Plus, Minus, Times]
 
-allowedIds = ["x1_p, x2_p, x3_p, y1_s, y2_s, y3_s"]
+allowedIds = ["x1_p", "x2_p", "x3_p", "y1_s", "y2_s", "y3_s"]
 
 allowedIdsGen = elements allowedIds
 
