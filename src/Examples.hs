@@ -9,7 +9,7 @@ import Parser (parseImp)
 
 -- Example "initialized-to-zero" memory
 mZ :: Memory
-mZ _ = 0
+mZ = \_ -> 0
 
 m0 :: Memory
 m0 = update mZ "y_s" 0
@@ -50,12 +50,17 @@ pdfExample2 = "input(secret, x); y := 0; if x then output(public, y) else skip"
 run100 :: Cmd -> Environment -> Configuration -> IO ()
 run100 p env config = runF 100 (getVars p) env config
 
+-- Basic run (empty input)
 runTyped :: Cmd -> Memory -> IO ()
-runTyped p m = 
+runTyped p m = runTypedWithInput p m []
+
+-- Run with explicit input tape
+runTypedWithInput :: Cmd -> Memory -> [Value] -> IO ()
+runTypedWithInput p m inputs = 
   let vars = getVars p
       env  = initEnv vars
   in case cmdType vars env public p of 
-    WellTyped env' -> run100 p env' (p, m, [], [])
+    WellTyped env' -> run100 p env' (p, m, inputs, [])
     TypeError msg -> print msg
 
 runUntyped :: Cmd -> Memory -> IO ()
@@ -64,12 +69,26 @@ runUntyped p m =
       env  = initEnv vars
   in run100 p env (p, m, [], [])
 
+runUntypedWithInput :: Cmd -> Memory -> [Value] -> IO ()
+runUntypedWithInput p m inputs =
+  let vars = getVars p
+      env  = initEnv vars
+  in run100 p env (p, m, inputs, [])
+
 runStringTyped :: String -> Memory -> IO ()
-runStringTyped s m = case parseImp s of
+runStringTyped s m = runStringTypedWithInput s m []
+
+runStringTypedWithInput :: String -> Memory -> [Value] -> IO ()
+runStringTypedWithInput s m inputs = case parseImp s of
     Left err -> print err
-    Right p  -> runTyped p m
+    Right p  -> runTypedWithInput p m inputs
 
 runStringUntyped :: String -> Memory -> IO ()
 runStringUntyped s m = case parseImp s of
     Left err -> print err
     Right p  -> runUntyped p m
+
+runStringUntypedWithInput :: String -> Memory -> [Value] -> IO ()
+runStringUntypedWithInput s m inputs = case parseImp s of
+    Left err -> print err
+    Right p  -> runUntypedWithInput p m inputs

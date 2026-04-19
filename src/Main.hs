@@ -6,38 +6,34 @@ import Types
 
 main :: IO ()
 main = do
-  putStrLn "--- Testing Parser ---"
+  -- Run tests on example programs --
+  putStrLn "--- TESTS ---"
   let progStr1 = "y_s := 42; x_p := y_s"
   let progStr2 = "if y_s then x_p := 1 else x_p := 0"
   let progStr3 = "while y_s do skip"
   let progStr4 = "if y_s then { x_p := 1; x_p := 0 } else skip"
-  let progStr5 = "input(secret, x); x := x + 1 ; output(public, x)" -- Should be rejected by type system
-  let progStr6 = "input(secret, x); x := 42 ; z := 3 ;  output(public, x)" -- Should be accepted by type system
+  let progStr5 = "input(secret, x); output(public, x)" -- Should be rejected
+  let progStr6 = "input(secret, x); x := 42 ; z := 3 ;  output(public, x)" -- Should be accepted
+  
   let tests = [progStr1, progStr2, progStr3, progStr4, progStr5, progStr6]
   mapM_ (\progStr -> do
     putStrLn $ "Testing: " ++ progStr
-    case parseImp progStr of
-      Left err -> print err
-      Right p -> do
-        putStrLn $ "Parsed: " ++ show p
-        runTyped p mZ
+    runStringTyped progStr mZ
     putStrLn ""
     ) tests
 
-  putStrLn "\n--- PDF Example 1 (Rejected) ---"
+  -- Input with explicit tape --
+  let progWithInput = "input(public, a); input(secret, b); c := a + b; output(secret, c)"
+  let inputTape = [10, 20]
+  putStrLn $ "Code: " ++ progWithInput
+  putStrLn $ "Input Tape: " ++ show inputTape
+  runStringTypedWithInput progWithInput mZ inputTape
+
+  -- PDF Examples from assignment 6 --
+  putStrLn "\n--- PDF Examples ---"
   putStrLn $ "Code: " ++ pdfExample1
   runStringTyped pdfExample1 mZ
 
-  putStrLn "\n--- PDF Example 2 (Rejected) ---"
+  putStrLn ""
   putStrLn $ "Code: " ++ pdfExample2
   runStringTyped pdfExample2 mZ
-
-  putStrLn "\n--- Running Original Examples ---"
-  putStrLn "\n--- Example 1 (mZ) ---"
-  runStringTyped example1 mZ 
-
-  putStrLn "\n--- Example 3 (m0) ---"
-  runStringTyped example3 m0
-
-  putStrLn "\n--- Example 4 (m0) ---"
-  runStringTyped example4 m0

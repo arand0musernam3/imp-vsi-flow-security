@@ -6,7 +6,7 @@ type VarName = String
 type Value   = Integer
 
 -- Generic Security Level
-data Level = L String deriving (Eq, Ord)
+newtype Level = L String deriving (Eq, Ord)
 
 instance Show Level where
     show (L s) = s
