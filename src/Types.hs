@@ -9,7 +9,6 @@ public = L "public"
 secret = L "secret"
 
 -- Lattice representation
--- For simplicity, we define the partial order and join explicitly
 data Lattice = Lattice {
     levels :: [Level],
     flows  :: [(Level, Level)], -- (a, b) means a ⊑ b
@@ -29,7 +28,7 @@ stdLattice = Lattice {
     ]
 }
 
--- Lattice operations using the provided lattice
+-- Lattice operations
 flowsto :: Lattice -> Level -> Level -> Bool
 flowsto lat a b = (a, b) `elem` flows lat
 
@@ -38,7 +37,7 @@ join lat a b = case Map.lookup (a, b) (joins lat) of
     Just l -> l
     Nothing -> error $ "Join not defined for " ++ show a ++ " and " ++ show b
 
--- convenient synonyms (implicitly using stdLattice)
+-- convenient synonyms
 (⊔) :: Level -> Level -> Level
 (⊔) = join stdLattice
 
@@ -46,20 +45,16 @@ join lat a b = case Map.lookup (a, b) (joins lat) of
 (⊑) = flowsto stdLattice
 
 -- Flow-sensitive environment
-type Environment = VarName -> Level
+-- (Type Environment = VarName -> Level is already defined in Imp.hs)
 
--- update environment
 updateEnv :: Environment -> VarName -> Level -> Environment
-updateEnv env x l y = if y == x then l else env y
+updateEnv env x l = \y -> if y == x then l else env y
 
--- join two environments
 joinEnv :: Environment -> Environment -> Environment
-joinEnv env1 env2 x = join stdLattice (env1 x) (env2 x)
+joinEnv env1 env2 = \x -> join stdLattice (env1 x) (env2 x)
 
--- check if one environment is more restrictive than another (env1 ⊑ env2)
 envFlowsTo :: [VarName] -> Environment -> Environment -> Bool
 envFlowsTo vars env1 env2 = all (\x -> flowsto stdLattice (env1 x) (env2 x)) vars
-
 
 -- Expression Typing
 exprType :: Environment -> Expr -> Level
@@ -68,7 +63,6 @@ exprType env (VarExpr x ) = env x
 exprType env (BinOpExpr _ e1 e2) =
     join stdLattice (exprType env e1) (exprType env e2)
 
--- Type result now returns the new environment
 data TypeRes = WellTyped Environment | TypeError String
 
 -- Command Typing (Flow-sensitive)
@@ -99,7 +93,7 @@ cmdType vars env pc (While e c) =
     let l = exprType env e
         pc' = pc ⊔ l
     in case cmdType vars env pc' c of
-        WellTyped env' ->
+        WellTyped env' -> 
             if envFlowsTo vars env' env -- Γ' ⊑ Γ
                then WellTyped env
                else TypeError "While loop body changes environment unpredictably"
@@ -121,15 +115,14 @@ cmdType _ env _ Stop = WellTyped env
 
 -- EXAMPLES
 
+-- We still allow the suffix convention for initial levels, 
+-- but now we also default to public if no suffix is found.
 levelFromName :: VarName -> Level
-levelFromName x =
-   if "_p" `isSuffixOf` x
-        then public
-        else secret
-
-allSecretEnv :: Environment
-allSecretEnv _ = secret
+levelFromName x 
+   | "_p" `isSuffixOf` x = public
+   | "_s" `isSuffixOf` x = secret
+   | otherwise           = public -- Default to public for inferred variables
 
 initEnv :: [VarName] -> Environment
 initEnv vars =
-  foldl (\env var -> updateEnv env var (levelFromName var)) allSecretEnv vars
+  foldl (\env var -> updateEnv env var (levelFromName var)) (\_ -> public) vars

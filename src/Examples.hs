@@ -9,7 +9,7 @@ import Parser (parseImp)
 
 -- Example "initialized-to-zero" memory
 mZ :: Memory
-mZ = \_ -> 0
+mZ _ = 0
 
 m0 :: Memory
 m0 = update mZ "y_s" 0
@@ -18,7 +18,6 @@ m1 :: Memory
 m1 = update mZ "y_s" 1
 
 -- Sample programs in strings
--- (Now that we have a parser)
 
 -- example1: x_p := y_s
 example1 :: String
@@ -38,7 +37,7 @@ exercise2 = "while y_s do skip"
 
 -- PDF Example 1 (Rejected)
 pdfExample1 :: String
-pdfExample1 = "input(secret, x); y := 0; if x then {output(public, y)} else output(public, y)"
+pdfExample1 = "input(secret, x); y := 0; if x then output(public, y) else output(public, y)"
 
 -- PDF Example 2 (Rejected)
 pdfExample2 :: String
@@ -47,25 +46,23 @@ pdfExample2 = "input(secret, x); y := 0; if x then output(public, y) else skip"
 ---
 -- Helper functions to run programs
 
-varsOfInterest :: [VarName]
-varsOfInterest = ["x_p", "y_s", "x", "y"] 
-
 -- Run program for at most 100 steps
--- Updated Configuration for I/O
-run100 :: Configuration -> IO ()
-run100 = runF 100 varsOfInterest
-
-checkWithVarsOfInterest :: Cmd -> TypeRes
-checkWithVarsOfInterest = cmdType varsOfInterest (initEnv varsOfInterest) public
+run100 :: Cmd -> Environment -> Configuration -> IO ()
+run100 p env config = runF 100 (getVars p) env config
 
 runTyped :: Cmd -> Memory -> IO ()
-runTyped p m = do 
-  case checkWithVarsOfInterest p of 
-    WellTyped _env' -> run100 (p, m, [], [])
+runTyped p m = 
+  let vars = getVars p
+      env  = initEnv vars
+  in case cmdType vars env public p of 
+    WellTyped env' -> run100 p env' (p, m, [], [])
     TypeError msg -> print msg
 
 runUntyped :: Cmd -> Memory -> IO ()
-runUntyped p m = run100 (p, m, [], [])
+runUntyped p m = 
+  let vars = getVars p
+      env  = initEnv vars
+  in run100 p env (p, m, [], [])
 
 runStringTyped :: String -> Memory -> IO ()
 runStringTyped s m = case parseImp s of

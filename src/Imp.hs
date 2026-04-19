@@ -1,13 +1,17 @@
 module Imp where
 
+import qualified Data.Set as Set
+
 type VarName = String
 type Value   = Integer
 
 -- Generic Security Level
-newtype Level = L String deriving (Eq, Ord)
+data Level = L String deriving (Eq, Ord)
 
 instance Show Level where
     show (L s) = s
+
+type Environment = VarName -> Level
 
 data BinOp = Plus | Minus | Times
               deriving (Eq,Show)
@@ -21,11 +25,28 @@ data Cmd = Skip | Assign VarName Expr | Seq Cmd Cmd
          | Stop
            deriving (Eq, Show)
 
+-- Get all variables used in a command
+getVars :: Cmd -> [VarName]
+getVars cmd = Set.toList (varsCmd cmd)
+  where
+    varsExpr (IntExpr _) = Set.empty
+    varsExpr (VarExpr x) = Set.singleton x
+    varsExpr (BinOpExpr _ e1 e2) = Set.union (varsExpr e1) (varsExpr e2)
+
+    varsCmd Skip = Set.empty
+    varsCmd (Assign x e) = Set.insert x (varsExpr e)
+    varsCmd (Seq c1 c2) = Set.union (varsCmd c1) (varsCmd c2)
+    varsCmd (If e c1 c2) = Set.unions [varsExpr e, varsCmd c1, varsCmd c2]
+    varsCmd (While e c) = Set.union (varsExpr e) (varsCmd c)
+    varsCmd (Input _ x) = Set.singleton x
+    varsCmd (Output _ e) = varsExpr e
+    varsCmd Stop = Set.empty
+
 -- Memory is a function from Variables to Values
 type Memory = VarName -> Value
 
 -- memory update
-update m x v y = if y == x then v else m y
+update m x v = \y -> if y == x then v else m y
 
 -- Configuration includes current command, memory, input stream, and output stream
 type Configuration = (Cmd, Memory, [Value], [Value])
@@ -39,7 +60,7 @@ exprEval (BinOpExpr binop e1 e2) m =
     let
         v1 = exprEval e1 m
         v2 = exprEval e2 m
-    in binOpSem binop v1 v2
+    in (binOpSem binop) v1 v2
       where
             binOpSem Plus   = (+)
             binOpSem Minus  = (-)
@@ -70,7 +91,7 @@ step (If e c1 c2, m, i, o) =
 step (While e c, m, i, o) = (If e (Seq c (While e c)) Skip, m, i, o)
 
 step (Input _ x, m, [], o) = (Stop, update m x 0, [], o) -- Default to 0 if input empty
-step (Input _ x, m, v:vs, o) = (Stop, update m x v, vs, o)
+step (Input _ x, m, (v:vs), o) = (Stop, update m x v, vs, o)
 
 step (Output _ e, m, i, o) =
     let v = exprEval e m
@@ -92,14 +113,14 @@ evalF n config =
         _    -> evalF (n-1) config'
 
 
--- print variables in vars on screen
-printMem :: Memory -> [VarName] -> IO ()
-printMem m = mapM_ ( \x ->  putStrLn (x ++ ": " ++  show (m x)) )
+-- print variables in vars on screen with their security level
+printMem :: Memory -> Environment -> [VarName] -> IO ()
+printMem m env = mapM_ ( \x ->  putStrLn (x ++ " (" ++ show (env x) ++ "): " ++  show (m x)) )
 
 -- run program c with fuel n and print the variable values and output
-runF n vars (c, m, i, o) =
+runF n vars env (c, m, i, o) =
     case evalF n (c, m, i, o) of
         OutOfFuel  -> print "OutOfFuel"
         Finished m' o' -> do
-            printMem m' vars
+            printMem m' env vars
             putStrLn $ "Output: " ++ show o'

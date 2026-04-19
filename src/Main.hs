@@ -11,7 +11,7 @@ main = do
   let progStr2 = "if y_s then x_p := 1 else x_p := 0"
   let progStr3 = "while y_s do skip"
   let progStr4 = "if y_s then { x_p := 1; x_p := 0 } else skip"
-  let progStr5 = "input(secret, x); output(public, x)" -- Should be rejected by type system
+  let progStr5 = "input(secret, x); x := x + 1 ; output(public, x)" -- Should be rejected by type system
   let progStr6 = "input(secret, x); x := 42 ; z := 3 ;  output(public, x)" -- Should be accepted by type system
   let tests = [progStr1, progStr2, progStr3, progStr4, progStr5, progStr6]
   mapM_ (\progStr -> do
