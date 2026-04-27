@@ -56,21 +56,25 @@ runTyped p m = runTypedWithInput p m []
 
 -- Run with explicit input tape
 runTypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runTypedWithInput (Program fns p) m inputs = 
-  let vars = getVars p
-      env  = initEnv vars
-  in case cmdType fns vars env public p of 
-    WellTyped env' -> run100 fns p env' (p, m, inputs, [], [])
-    TypeError msg -> print msg
+runTypedWithInput prog@(Program fns p) m inputs = 
+  do
+    putStrLn $ "AST: " ++ show prog
+    let vars = getVars p
+    let env  = initEnv vars
+    case cmdType fns vars env public p of 
+      WellTyped env' -> run100 fns p env' (p, m, inputs, [], [])
+      TypeError msg -> print msg
 
 runUntyped :: Program -> Memory -> IO ()
 runUntyped p m = runUntypedWithInput p m []
 
 runUntypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runUntypedWithInput (Program fns p) m inputs =
-  let vars = getVars p
-      env  = initEnv vars
-  in run100 fns p env (p, m, inputs, [], [])
+runUntypedWithInput prog@(Program fns p) m inputs =
+  do
+    putStrLn $ "AST: " ++ show prog
+    let vars = getVars p
+    let env  = initEnv vars
+    run100 fns p env (p, m, inputs, [], [])
 
 runStringTyped :: String -> Memory -> IO ()
 runStringTyped s m = runStringTypedWithInput s m []

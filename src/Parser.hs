@@ -17,7 +17,7 @@ lexer = Token.makeTokenParser style
       , Token.commentEnd      = "*/"
       , Token.commentLine     = "//"
       , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop",
-                                 "input", "output", "def", "return", "call", "main"]
+                                 "input", "output", "def", "return", "call"]
       , Token.reservedOpNames = [":=", "+", "-", "*", ";", ","]
       }
 
@@ -108,7 +108,7 @@ functionDef = do
 program = do
     whiteSpace
     fns <- many (do { f <- functionDef; optional (reservedOp ";"); return f })
-    mainCmd <- (reserved "main" >> commandBlock) <|> command
+    mainCmd <- command
     return $ Program fns mainCmd
 
 -- Main Parser
