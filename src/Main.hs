@@ -37,3 +37,22 @@ main = do
   putStrLn ""
   putStrLn $ "Code: " ++ pdfExample2
   runStringTyped pdfExample2 mZ
+
+  -- Function Tests --
+  putStrLn "\n--- FUNCTION TESTS ---"
+  
+  let funcTest1 = "def inc(a) { a := a + 1 } return a; x_p := 5; y_p := call inc(x_p)"
+  putStrLn $ "Testing: " ++ funcTest1
+  runStringTyped funcTest1 mZ
+
+  let funcTest2 = "def f(s) { if s then r := 1 else r := 0 } return r; x_s := 1; y_p := call f(x_s); output(public, y_p)"
+  putStrLn $ "\nTesting (Should fail): " ++ funcTest2
+  runStringTyped funcTest2 mZ
+
+  let funcTest3 = "def f(s) { r := s } return r; x_s := 42; y_p := call f(x_s); output(secret, y_p)"
+  putStrLn $ "\nTesting (Should pass): " ++ funcTest3
+  runStringTyped funcTest3 mZ
+
+  let funcTestRecursive = "def fact(n) { if n then { n1 := n - 1; res1 := call fact(n1); res := n * res1 } else { res := 1 } } return res; main { x_p := 3; y_p := call fact(x_p) }"
+  putStrLn $ "\nTesting Recursive: " ++ funcTestRecursive
+  runStringTyped funcTestRecursive mZ

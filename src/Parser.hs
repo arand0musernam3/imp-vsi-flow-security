@@ -17,7 +17,7 @@ lexer = Token.makeTokenParser style
       , Token.commentEnd      = "*/"
       , Token.commentLine     = "//"
       , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop",
-                                 "input", "output"]
+                                 "input", "output", "def", "return", "call", "main"]
       , Token.reservedOpNames = [":=", "+", "-", "*", ";", ","]
       }
 
@@ -50,7 +50,10 @@ expression = buildExpressionParser operators term
 
 -- Command Parser
 command :: Parser Cmd
-command = semiSep1 statement >>= return . foldl1 Seq
+command = do
+    cmds <- statement `sepBy1` reservedOp ";"
+    optional (reservedOp ";")
+    return $ foldl1 Seq cmds
 
 statement :: Parser Cmd
 statement =  (reserved "skip" >> return Skip)
@@ -76,7 +79,13 @@ statement =  (reserved "skip" >> return Skip)
          <|> (do
                 var <- identifier
                 reservedOp ":="
-                Assign var <$> expression)
+                let callP = do
+                      reserved "call"
+                      fName <- identifier
+                      args <- parens (expression `sepBy` comma)
+                      return $ Call var fName args
+                    assignP = Assign var <$> expression
+                callP <|> assignP)
 
 commandBlock :: Parser Cmd
 commandBlock = braces command <|> parens command <|> statement
@@ -84,6 +93,24 @@ commandBlock = braces command <|> parens command <|> statement
 semiSep1 :: Parser a -> Parser [a]
 semiSep1 p = p `sepBy1` reservedOp ";"
 
+-- Function Parser
+functionDef :: Parser Function
+functionDef = do
+    reserved "def"
+    fName <- identifier
+    args <- parens (identifier `sepBy` comma)
+    body <- braces command
+    reserved "return"
+    retExpr <- expression
+    return $ Function fName args body retExpr
+
+-- Program Parser
+program = do
+    whiteSpace
+    fns <- many (do { f <- functionDef; optional (reservedOp ";"); return f })
+    mainCmd <- (reserved "main" >> commandBlock) <|> command
+    return $ Program fns mainCmd
+
 -- Main Parser
-parseImp :: String -> Either ParseError Cmd
-parseImp = parse (whiteSpace >> command <* eof) ""
+parseImp :: String -> Either ParseError Program
+parseImp = parse (whiteSpace >> program <* eof) ""

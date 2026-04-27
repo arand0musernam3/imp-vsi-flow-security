@@ -47,33 +47,30 @@ pdfExample2 = "input(secret, x); y := 0; if x then output(public, y) else skip"
 -- Helper functions to run programs
 
 -- Run program for at most 100 steps
-run100 :: Cmd -> Environment -> Configuration -> IO ()
-run100 p env config = runF 100 (getVars p) env config
+run100 :: [Function] -> Cmd -> Environment -> Configuration -> IO ()
+run100 fns p env config = runF 100 fns (getVars p) env config
 
 -- Basic run (empty input)
-runTyped :: Cmd -> Memory -> IO ()
+runTyped :: Program -> Memory -> IO ()
 runTyped p m = runTypedWithInput p m []
 
 -- Run with explicit input tape
-runTypedWithInput :: Cmd -> Memory -> [Value] -> IO ()
-runTypedWithInput p m inputs = 
+runTypedWithInput :: Program -> Memory -> [Value] -> IO ()
+runTypedWithInput (Program fns p) m inputs = 
   let vars = getVars p
       env  = initEnv vars
-  in case cmdType vars env public p of 
-    WellTyped env' -> run100 p env' (p, m, inputs, [])
+  in case cmdType fns vars env public p of 
+    WellTyped env' -> run100 fns p env' (p, m, inputs, [], [])
     TypeError msg -> print msg
 
-runUntyped :: Cmd -> Memory -> IO ()
-runUntyped p m = 
-  let vars = getVars p
-      env  = initEnv vars
-  in run100 p env (p, m, [], [])
+runUntyped :: Program -> Memory -> IO ()
+runUntyped p m = runUntypedWithInput p m []
 
-runUntypedWithInput :: Cmd -> Memory -> [Value] -> IO ()
-runUntypedWithInput p m inputs =
+runUntypedWithInput :: Program -> Memory -> [Value] -> IO ()
+runUntypedWithInput (Program fns p) m inputs =
   let vars = getVars p
       env  = initEnv vars
-  in run100 p env (p, m, inputs, [])
+  in run100 fns p env (p, m, inputs, [], [])
 
 runStringTyped :: String -> Memory -> IO ()
 runStringTyped s m = runStringTypedWithInput s m []
