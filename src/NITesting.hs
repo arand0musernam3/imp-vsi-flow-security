@@ -49,11 +49,11 @@ assignGen = do
 
 inputGen = do
     var <- allowedIdsGen
-    l <- elements [L "public", L "secret"]
+    l <- elements [lowL, highL]
     return $ Input l var
 
 outputGen = do
-    l <- elements [L "public", L "secret"]
+    l <- elements [lowL, highL]
     e <- arbitrary
     return $ Output l e
 

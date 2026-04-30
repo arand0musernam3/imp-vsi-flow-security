@@ -5,11 +5,17 @@ import Text.Parsec.String (Parser)
 import Text.Parsec.Expr
 import Text.Parsec.Language (emptyDef)
 import qualified Text.Parsec.Token as Token
+import Data.Functor.Identity
+import Data.List (nub)
 
 import Imp
+import Types (mkSecurityLattice, stdLatticeNames, stdLatticeRelations)
+
+-- Use SecurityLattice as state
+type LParser a = Parsec String SecurityLattice a
 
 -- Lexer definition
-lexer :: Token.TokenParser ()
+lexer :: Token.GenTokenParser String SecurityLattice Identity
 lexer = Token.makeTokenParser style
   where
     style = emptyDef
@@ -17,8 +23,8 @@ lexer = Token.makeTokenParser style
       , Token.commentEnd      = "*/"
       , Token.commentLine     = "//"
       , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop",
-                                 "input", "output", "def", "return", "call"]
-      , Token.reservedOpNames = [":=", "+", "-", "*", ";", ","]
+                                 "input", "output", "def", "return", "call", "lattice"]
+      , Token.reservedOpNames = [":=", "+", "-", "*", ";", ",", "<"]
       }
 
 integer    = Token.integer lexer
@@ -32,12 +38,16 @@ comma      = Token.comma lexer
 whiteSpace = Token.whiteSpace lexer
 
 -- Level Parser
--- We allow any identifier to be a level, but we specifically match common ones
-level :: Parser Level
-level = L <$> identifier
+level :: LParser Level
+level = do
+    name <- identifier
+    lat <- getState
+    case filter (\l -> lName l == name) (latticeLevels lat) of
+        (l:_) -> return l
+        []    -> fail $ "Level " ++ name ++ " not found in lattice"
 
 -- Expression Parser
-expression :: Parser Expr
+expression :: LParser Expr
 expression = buildExpressionParser operators term
   where
     operators = [ [Infix (reservedOp "*" >> return (BinOpExpr Times)) AssocLeft]
@@ -49,13 +59,13 @@ expression = buildExpressionParser operators term
         <|> (VarExpr <$> identifier)
 
 -- Command Parser
-command :: Parser Cmd
+command :: LParser Cmd
 command = do
     cmds <- statement `sepBy1` reservedOp ";"
     optional (reservedOp ";")
     return $ foldl1 Seq cmds
 
-statement :: Parser Cmd
+statement :: LParser Cmd
 statement =  (reserved "skip" >> return Skip)
          <|> (reserved "stop" >> return Stop)
          <|> (reserved "input" >> parens (do
@@ -87,14 +97,14 @@ statement =  (reserved "skip" >> return Skip)
                     assignP = Assign var <$> expression
                 callP <|> assignP)
 
-commandBlock :: Parser Cmd
+commandBlock :: LParser Cmd
 commandBlock = braces command <|> parens command <|> statement
 
-semiSep1 :: Parser a -> Parser [a]
+semiSep1 :: LParser a -> LParser [a]
 semiSep1 p = p `sepBy1` reservedOp ";"
 
 -- Function Parser
-functionDef :: Parser Function
+functionDef :: LParser Function
 functionDef = do
     reserved "def"
     fName <- identifier
@@ -104,13 +114,48 @@ functionDef = do
     retExpr <- expression
     return $ Function fName args body retExpr
 
+-- Lattice Definition Parser
+-- Supports both:
+-- 1. lattice { a, b, c } -> interpreted as a < b < c
+-- 2. lattice { a < b, a < c, b < d, c < d } -> arbitrary partial order
+latticeDef :: LParser ()
+latticeDef = (do
+    reserved "lattice"
+    braces $ do
+      -- Try to parse as relations first
+      rels <- (do
+          r <- relation `sepBy` comma
+          if null r then fail "empty" else return (Left r)
+        ) <|> (do
+          names <- identifier `sepBy` comma
+          return (Right names)
+        )
+      case rels of
+        Left r -> do
+          let names = nub $ concat [ [u, v] | (u, v) <- r ]
+          putState $ mkSecurityLattice names r
+        Right names -> do
+          let r = zip names (tail names)
+          putState $ mkSecurityLattice names r
+  ) <|> return ()
+  where
+    relation = do
+      u <- identifier
+      reservedOp "<"
+      v <- identifier
+      return (u, v)
+
 -- Program Parser
+program :: LParser Program
 program = do
     whiteSpace
+    latticeDef
+    optional (reservedOp ";")
     fns <- many (do { f <- functionDef; optional (reservedOp ";"); return f })
     mainCmd <- command
-    return $ Program fns mainCmd
+    lat <- getState
+    return $ Program lat fns mainCmd
 
 -- Main Parser
 parseImp :: String -> Either ParseError Program
-parseImp = parse (whiteSpace >> program <* eof) ""
+parseImp = runParser (whiteSpace >> program <* eof) (mkSecurityLattice stdLatticeNames stdLatticeRelations) ""

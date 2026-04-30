@@ -37,11 +37,11 @@ exercise2 = "while y_s do skip"
 
 -- PDF Example 1 (Rejected)
 pdfExample1 :: String
-pdfExample1 = "input(secret, x); y := 0; if x then output(public, y) else output(public, y)"
+pdfExample1 = "input(high, x); y := 0; if x then output(low, y) else output(low, y)"
 
 -- PDF Example 2 (Rejected)
 pdfExample2 :: String
-pdfExample2 = "input(secret, x); y := 0; if x then output(public, y) else skip"
+pdfExample2 = "input(high, x); y := 0; if x then output(low, y) else skip"
 
 ---
 -- Helper functions to run programs
@@ -56,24 +56,26 @@ runTyped p m = runTypedWithInput p m []
 
 -- Run with explicit input tape
 runTypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runTypedWithInput prog@(Program fns p) m inputs = 
+runTypedWithInput prog@(Program lat fns p) m inputs = 
   do
     putStrLn $ "AST: " ++ show prog
     let vars = getVars p
-    let env  = initEnv vars
-    case cmdType fns vars env public p of 
+    let env  = initEnv lat vars
+    -- PC starts at the bottom level of the lattice
+    let bottom = head (latticeLevels lat)
+    case cmdType lat fns vars env bottom p of 
       WellTyped env' -> run100 fns p env' (p, m, inputs, [], [])
-      TypeError msg -> print msg
+      TypeError msg -> putStrLn msg
 
 runUntyped :: Program -> Memory -> IO ()
 runUntyped p m = runUntypedWithInput p m []
 
 runUntypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runUntypedWithInput prog@(Program fns p) m inputs =
+runUntypedWithInput prog@(Program lat fns p) m inputs =
   do
     putStrLn $ "AST: " ++ show prog
     let vars = getVars p
-    let env  = initEnv vars
+    let env  = initEnv lat vars
     run100 fns p env (p, m, inputs, [], [])
 
 runStringTyped :: String -> Memory -> IO ()

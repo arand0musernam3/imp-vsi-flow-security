@@ -2,15 +2,49 @@ module Imp where
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
+import Data.List (nub, elemIndex)
+import Algebra.Lattice
 
 type VarName = String
 type Value   = Integer
 
 -- Generic Security Level
-newtype Level = L String deriving (Eq, Ord)
+data Level = L {
+    lName       :: String,
+    lId         :: Int,
+    lJoinTable  :: [[Int]],
+    lMeetTable  :: [[Int]],
+    lFlowsTable :: [[Bool]],
+    lAllNames   :: [String] -- Keep names to allow consistent recreation
+}
+
+instance Eq Level where
+    (L _ i1 _ _ _ _) == (L _ i2 _ _ _ _) = i1 == i2
+
+instance Ord Level where
+    l1 <= l2 = (lFlowsTable l1) !! (lId l1) !! (lId l2)
+    compare l1 l2 
+        | l1 == l2 = EQ
+        | l1 <= l2 = LT
+        | otherwise = GT
 
 instance Show Level where
-    show (L s) = s
+    show l = lName l
+
+-- The Lattice instance now uses the pre-computed tables
+instance Lattice Level where
+    l1 \/ l2 = 
+        let nextId = (lJoinTable l1) !! (lId l1) !! (lId l2)
+        in l1 { lId = nextId, lName = (lAllNames l1) !! nextId }
+    
+    l1 /\ l2 = 
+        let nextId = (lMeetTable l1) !! (lId l1) !! (lId l2)
+        in l1 { lId = nextId, lName = (lAllNames l1) !! nextId }
+
+-- Lattice representation
+data SecurityLattice = SecurityLattice {
+    latticeLevels :: [Level]
+} deriving (Show, Eq)
 
 type Environment = VarName -> Level
 
@@ -27,7 +61,7 @@ data Function = Function {
     funcReturn :: Expr 
 } deriving (Eq, Show)
 
-data Program = Program [Function] Cmd deriving (Eq, Show)
+data Program = Program SecurityLattice [Function] Cmd deriving (Eq, Show)
 
 data Cmd = Skip | Assign VarName Expr | Seq Cmd Cmd
          | If Expr Cmd Cmd | While Expr Cmd
