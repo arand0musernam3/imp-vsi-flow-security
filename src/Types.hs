@@ -131,6 +131,10 @@ cmdType' fns summaries vars env pc cmd = case cmd of
         in if not ((pc ⊔ l) ⊑ ch)
         then TypeError $ "Output failed: (pc join expr) (" ++ show (pc ⊔ l) ++ ") does not flow to channel (" ++ show ch ++ ")"
         else WellTyped env
+    Erase l_cmd x ->
+        let l_var = env x
+            l' = l_cmd ⊔ l_var ⊔ pc
+        in WellTyped (updateEnv env x l')
     Call x fName args ->
         case filter (\f -> funcName f == fName) fns of
             [] -> TypeError $ "Function " ++ fName ++ " not found"

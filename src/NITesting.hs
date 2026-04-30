@@ -57,6 +57,11 @@ outputGen = do
     e <- arbitrary
     return $ Output l e
 
+eraseGen = do
+    var <- allowedIdsGen
+    l <- elements [lowL, highL]
+    return $ Erase l var
+
 ifGen 0 = error "should not be called"
 ifGen n = do
    expr <- arbitrary
@@ -80,7 +85,7 @@ skipGen = return Skip
 
 stmtExprGen 0 = return Skip
 stmtExprGen n | n > 0 = frequency
-   [ (2, assignGen), (1, inputGen), (1, outputGen), (1, ifGen n), (1, whileGen n), (1, seqGen n), (1, skipGen)]
+   [ (2, assignGen), (1, inputGen), (1, outputGen), (1, eraseGen), (1, ifGen n), (1, whileGen n), (1, seqGen n), (1, skipGen)]
 
 
 
@@ -98,6 +103,7 @@ instance Arbitrary Cmd where
                                  ++ [ If e c1 c2' | c2' <- shrink c2]
   shrink (Input l x) = [Skip]
   shrink (Output l e) = [Skip] ++ [ Output l e' | e' <- shrink e]
+  shrink (Erase l x) = [Skip]
   shrink _ = []
 
 

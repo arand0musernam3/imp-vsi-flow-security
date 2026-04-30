@@ -3,6 +3,7 @@ module Examples where
 import Imp
 import Types
 import Parser (parseImp)
+import qualified Data.Map as Map
 
 -- EXAMPLES
 -- Memory environments with different secrets
@@ -10,12 +11,6 @@ import Parser (parseImp)
 -- Example "initialized-to-zero" memory
 mZ :: Memory
 mZ = \_ -> 0
-
-m0 :: Memory
-m0 = update mZ "y_s" 0
-
-m1 :: Memory
-m1 = update mZ "y_s" 1
 
 -- Sample programs in strings
 
@@ -47,51 +42,66 @@ pdfExample2 = "input(high, x); y := 0; if x then output(low, y) else skip"
 -- Helper functions to run programs
 
 -- Run program for at most 100 steps
-run100 :: [Function] -> Cmd -> Environment -> Configuration -> IO ()
-run100 fns p env config = runF 100 fns (getVars p) env config
+run100 :: SecurityLattice -> [Function] -> Cmd -> MultiMemory -> Labels -> IO ()
+run100 lat fns p mm labs = runF 100 lat fns (getVars p) (p, mm, labs, [head (latticeLevels lat)], [], [], [])
 
 -- Basic run (empty input)
-runTyped :: Program -> Memory -> IO ()
-runTyped p m = runTypedWithInput p m []
+runTyped :: Program -> IO ()
+runTyped p = runTypedWithInput p []
 
 -- Run with explicit input tape
-runTypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runTypedWithInput prog@(Program lat fns p) m inputs = 
+runTypedWithInput :: Program -> [Value] -> IO ()
+runTypedWithInput prog@(Program lat fns p) inputs = 
   do
     putStrLn $ "AST: " ++ show prog
     let vars = getVars p
-    let env  = initEnv lat vars
-    -- PC starts at the bottom level of the lattice
     let bottom = head (latticeLevels lat)
-    case cmdType lat fns vars env bottom p of 
-      WellTyped env' -> run100 fns p env' (p, m, inputs, [], [])
-      TypeError msg -> putStrLn msg
+    
+    -- Initial Dynamic Labels (everything is bottom)
+    let initialLabels _ = bottom
+    
+    -- Initial MultiMemory (empty for all levels)
+    let initialMultiMemory = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
+    
+    -- Static analysis check (using Types.hs)
+    let staticEnv = initEnv lat vars
+    case cmdType lat fns vars staticEnv bottom p of 
+      WellTyped _ -> do
+          putStrLn "--- Static Analysis: WELL-TYPED ---"
+          runF 100 lat fns vars (p, initialMultiMemory, initialLabels, [bottom], inputs, [], [])
+      TypeError msg -> do
+          putStrLn $ "--- Static Analysis: TYPE ERROR ---"
+          putStrLn msg
+          putStrLn "--- Proceeding with Runtime Execution (Untyped) ---"
+          runF 100 lat fns vars (p, initialMultiMemory, initialLabels, [bottom], inputs, [], [])
 
-runUntyped :: Program -> Memory -> IO ()
-runUntyped p m = runUntypedWithInput p m []
+runUntyped :: Program -> IO ()
+runUntyped p = runUntypedWithInput p []
 
-runUntypedWithInput :: Program -> Memory -> [Value] -> IO ()
-runUntypedWithInput prog@(Program lat fns p) m inputs =
+runUntypedWithInput :: Program -> [Value] -> IO ()
+runUntypedWithInput prog@(Program lat fns p) inputs =
   do
     putStrLn $ "AST: " ++ show prog
     let vars = getVars p
-    let env  = initEnv lat vars
-    run100 fns p env (p, m, inputs, [], [])
+    let bottom = head (latticeLevels lat)
+    let initialLabels _ = bottom
+    let initialMultiMemory = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
+    runF 100 lat fns vars (p, initialMultiMemory, initialLabels, [bottom], inputs, [], [])
 
-runStringTyped :: String -> Memory -> IO ()
-runStringTyped s m = runStringTypedWithInput s m []
+runStringTyped :: String -> IO ()
+runStringTyped s = runStringTypedWithInput s []
 
-runStringTypedWithInput :: String -> Memory -> [Value] -> IO ()
-runStringTypedWithInput s m inputs = case parseImp s of
+runStringTypedWithInput :: String -> [Value] -> IO ()
+runStringTypedWithInput s inputs = case parseImp s of
     Left err -> print err
-    Right p  -> runTypedWithInput p m inputs
+    Right p  -> runTypedWithInput p inputs
 
-runStringUntyped :: String -> Memory -> IO ()
-runStringUntyped s m = case parseImp s of
+runStringUntyped :: String -> IO ()
+runStringUntyped s = case parseImp s of
     Left err -> print err
-    Right p  -> runUntyped p m
+    Right p  -> runUntyped p
 
-runStringUntypedWithInput :: String -> Memory -> [Value] -> IO ()
-runStringUntypedWithInput s m inputs = case parseImp s of
+runStringUntypedWithInput :: String -> [Value] -> IO ()
+runStringUntypedWithInput s inputs = case parseImp s of
     Left err -> print err
-    Right p  -> runUntypedWithInput p m inputs
+    Right p  -> runUntypedWithInput p inputs

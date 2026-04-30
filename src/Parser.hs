@@ -23,7 +23,7 @@ lexer = Token.makeTokenParser style
       , Token.commentEnd      = "*/"
       , Token.commentLine     = "//"
       , Token.reservedNames   = ["skip", "if", "then", "else", "while", "do", "stop",
-                                 "input", "output", "def", "return", "call", "lattice"]
+                                 "input", "output", "def", "return", "call", "lattice", "erase"]
       , Token.reservedOpNames = [":=", "+", "-", "*", ";", ",", "<"]
       }
 
@@ -76,6 +76,10 @@ statement =  (reserved "skip" >> return Skip)
                 l <- level
                 comma
                 Output l <$> expression))
+         <|> (reserved "erase" >> parens (do
+                l <- level
+                comma
+                Erase l <$> identifier))
          <|> (reserved "if" >> do
                 cond <- expression
                 reserved "then"
@@ -124,7 +128,7 @@ latticeDef = (do
     braces $ do
       -- Try to parse as relations first
       rels <- (do
-          r <- relation `sepBy` comma
+          r <- try (relation `sepBy` comma)
           if null r then fail "empty" else return (Left r)
         ) <|> (do
           names <- identifier `sepBy` comma
