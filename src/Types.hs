@@ -1,7 +1,7 @@
 module Types where
 
 import Imp
-import Data.List (isSuffixOf, nub, elemIndex)
+import Data.List (elemIndex)
 import qualified Data.Map as Map
 import Algebra.Lattice
 
@@ -138,47 +138,79 @@ cmdType' fns summaries vars env pc cmd = case cmd of
     Call x fName args ->
         case filter (\f -> funcName f == fName) fns of
             [] -> TypeError $ "Function " ++ fName ++ " not found"
-            (f:_) ->
+            (_:_) ->
                 let argLevels = map (exprType env) args
                 in case Map.lookup (fName, argLevels, pc) summaries of
                     Just retLevel -> WellTyped (updateEnv env x (pc ⊔ retLevel))
-                    Nothing -> TypeError $ "Function summary not found for " ++ fName
+                    Nothing -> TypeError $ "Function " ++ fName
+                              ++ " is not well-typed for argument levels "
+                              ++ show argLevels ++ " under PC " ++ show pc
+                              ++ "; refusing the call."
     Return -> WellTyped env
     Stop -> WellTyped env
+    Halt -> WellTyped env
+    -- ResetPC is inserted at runtime by step If; it never appears in
+    -- parsed source, so the static type-checker never actually sees it.
+    -- This case exists for exhaustiveness only.
+    ResetPC -> WellTyped env
 
--- Compute function summaries using fixed-point iteration
+-- Compute function summaries in two phases:
+--
+--   Phase 1 (assumed) — fixed-point iteration starting from a permissive
+--   "every function returns bottom" assumption. This map is only used
+--   *internally* to seed recursion when type-checking function bodies; a
+--   recursive call to f from within f's body needs *some* retLevel to
+--   proceed, and bottom is the most permissive seed.
+--
+--   Phase 2 (verified) — re-type each function body under the converged
+--   `assumed` map. Combos whose body type-checks at this point are exported
+--   with the corresponding retLevel; combos whose body fails are *omitted*.
+--   The caller-side cmdType' Call lookup turns a missing entry into a
+--   TypeError, which is what closes the soundness gap: previously, a body
+--   that fails for (argL, pcL) left the assumed-bottom entry in place and
+--   the call silently succeeded with retLevel = bottom.
 computeSummaries :: SecurityLattice -> [Function] -> FuncSummaries
-computeSummaries lat fns = iterateSummaries fns initialSummaries
+computeSummaries lat fns = verified
   where
     allLevels = latticeLevels lat
-    
-    -- All possible argument level combinations for a function
+    bot = head allLevels
+
     argCombos f = combinations (length (funcArgs f))
     combinations 0 = [[]]
     combinations n = [ l:ls | l <- allLevels, ls <- combinations (n-1) ]
 
-    -- Initial assumption: all functions return bottom
-    initialSummaries = Map.fromList [ ((funcName f, argL, pcL), head allLevels) 
-                                    | f <- fns, argL <- argCombos f, pcL <- allLevels ]
+    typeCheckBody current f argL pcL =
+        let initFEnv y = case lookup y (zip (funcArgs f) argL) of
+                            Just l -> l
+                            Nothing -> bot
+            fVars = getVars (funcBody f)
+        in cmdType' fns current fVars initFEnv pcL (funcBody f)
 
-    iterateSummaries fns' current =
-        let next = foldl ( \acc f -> 
-                foldl ( \acc' argL -> 
-                    foldl ( \acc'' pcL -> 
-                        let initFEnv y = case lookup y (zip (funcArgs f) argL) of
-                                            Just l -> l
-                                            Nothing -> head allLevels
-                            fVars = getVars (funcBody f)
-                            res = cmdType' fns current fVars initFEnv pcL (funcBody f)
-                        in case res of
-                            WellTyped fEnvAfter ->
-                                let retL = exprType fEnvAfter (funcReturn f)
-                                in Map.insert (funcName f, argL, pcL) retL acc''
-                            _ -> acc''
-                    ) acc' allLevels
-                ) acc (argCombos f)
-              ) current fns'
-        in if next == current then current else iterateSummaries fns' next
+    initialAssumed = Map.fromList [ ((funcName f, argL, pcL), bot)
+                                  | f <- fns, argL <- argCombos f, pcL <- allLevels ]
+
+    iterateAssumed current =
+        let next = foldl (\acc f ->
+                    foldl (\acc' argL ->
+                        foldl (\acc'' pcL ->
+                            case typeCheckBody current f argL pcL of
+                                WellTyped envAfter ->
+                                    let retL = exprType envAfter (funcReturn f)
+                                    in Map.insert (funcName f, argL, pcL) retL acc''
+                                _ -> acc''
+                        ) acc' allLevels
+                    ) acc (argCombos f)
+                  ) current fns
+        in if next == current then current else iterateAssumed next
+
+    assumed = iterateAssumed initialAssumed
+
+    verified = Map.fromList
+        [ ((funcName f, argL, pcL), retL)
+        | f <- fns, argL <- argCombos f, pcL <- allLevels
+        , WellTyped envAfter <- [typeCheckBody assumed f argL pcL]
+        , let retL = exprType envAfter (funcReturn f)
+        ]
 
 -- Wrap original cmdType to use summaries
 cmdType lat fns vars env pc cmd =
@@ -187,12 +219,8 @@ cmdType lat fns vars env pc cmd =
 
 -- EXAMPLES
 
-levelFromName :: SecurityLattice -> VarName -> Level
-levelFromName lat x 
-   | "_p" `isSuffixOf` x = public
-   | "_s" `isSuffixOf` x = secret
-   | otherwise           = head (latticeLevels lat)
-
+-- levelFromName lives in Imp.hs (so the dynamic monitor can use it); it is
+-- in scope here via `import Imp`.
 initEnv :: SecurityLattice -> [VarName] -> Environment
 initEnv lat vars =
   foldl (\env var -> updateEnv env var (levelFromName lat var)) (\_ -> head (latticeLevels lat)) vars

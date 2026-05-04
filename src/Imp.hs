@@ -2,7 +2,7 @@ module Imp where
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import Data.List (elemIndex)
+import Data.List (elemIndex, isSuffixOf)
 import Algebra.Lattice
 
 type VarName = String
@@ -69,8 +69,9 @@ data Cmd = Skip | Assign VarName Expr | Seq Cmd Cmd
          | Erase Level VarName
          | Call VarName String [Expr]
          | Return
-         | Stop
-         | ResetPC -- Internal command: pop the top of the PC stack on If/While exit
+         | Stop -- Internal: "this command has finished"; absorbed by Seq.
+         | Halt -- User-facing `stop` keyword: halts the entire program.
+         | ResetPC -- Internal: pop the top of the PC stack on If/While exit.
            deriving (Eq, Show)
 
 -- Get all variables used in a command
@@ -92,6 +93,7 @@ getVars cmd = Set.toList (varsCmd cmd)
     varsCmd (Call x _ args) = Set.insert x (Set.unions (map varsExpr args))
     varsCmd Return = Set.empty
     varsCmd Stop = Set.empty
+    varsCmd Halt = Set.empty
     varsCmd ResetPC = Set.empty
 
 -- Memory is a function from Variables to Values
@@ -136,6 +138,25 @@ eraseMultiMemory lat mm x targetLevel =
                 then Map.insert (lId l) (update (getMem acc l) x 0) acc
                 else acc)
           mm (latticeLevels lat)
+
+-- Default label for a variable based on its name suffix:
+--   *_p          → the lattice's "low"  level (public)
+--   *_s          → the lattice's "high" level (secret)
+--   anything else → the lattice's bottom level
+-- The "low" / "high" levels are looked up by name in the given lattice, so
+-- the convention works for custom lattices that include those names. If the
+-- lattice has no level named "low" / "high", we fall back to bottom (safe
+-- under-approximation; nothing flows below bottom).
+levelFromName :: SecurityLattice -> VarName -> Level
+levelFromName lat x =
+    let levels = latticeLevels lat
+        bot    = head levels
+        byName n = case filter (\l -> lName l == n) levels of
+                     (l:_) -> l
+                     []    -> bot
+    in if      "_p" `isSuffixOf` x then byName "low"
+       else if "_s" `isSuffixOf` x then byName "high"
+       else bot
 
 -- Expression level (join of all variables' labels)
 getExprLevel :: Expr -> Labels -> Level -> Level
@@ -184,10 +205,16 @@ step mode lat _ (Assign x e, mm, labs, pcs, i, o, s) =
             in (Stop, new_mm, new_labs, pcs, i, o, s)
 
 step mode lat fns (Seq c1 c2, mm, labs, pcs, i, o, s) =
-    let (c1', mm', labs', pcs', i', o', s') = step mode lat fns (c1, mm, labs, pcs, i, o, s)
-    in case c1' of
-          Stop -> (c2, mm', labs', pcs', i', o', s')
-          _    -> (Seq c1' c2, mm', labs', pcs', i', o', s')
+    case c1 of
+        -- Propagate user halt without stepping into it (otherwise we would
+        -- hit `step Stop = error` for nested forms like `Seq Halt _`).
+        Halt -> (Halt, mm, labs, pcs, i, o, s)
+        _ ->
+            let (c1', mm', labs', pcs', i', o', s') = step mode lat fns (c1, mm, labs, pcs, i, o, s)
+            in case c1' of
+                  Stop -> (c2,            mm', labs', pcs', i', o', s')
+                  Halt -> (Halt,          mm', labs', pcs', i', o', s')
+                  _    -> (Seq c1' c2,    mm', labs', pcs', i', o', s')
 
 step _ lat _ (If e c1 c2, mm, labs, pcs, i, o, s) =
     let pc = head pcs
@@ -227,6 +254,12 @@ step mode lat _ (Input ch x, mm, labs, pcs, i, o, s) =
                 in (Stop, new_mm, new_labs, pcs, vs, o, s)
 
 step mode lat _ (Output ch e, mm, labs, pcs, i, o, s) =
+    -- Note on the memory view: Assign / Return / If read at m_(pc ⊔ l_e),
+    -- but Output reads at m_ch instead. That's correct because the flow
+    -- check below requires (l_e ⊔ pc) ⊑ ch, i.e. ch dominates the target
+    -- view, and a higher view contains at least as much information as a
+    -- lower one. If the check fails we error out before consuming v, so
+    -- the read is never observable in the failing case.
     let m_ch = getMem mm ch
         v = exprEval e m_ch
         bottom = head (latticeLevels lat)
@@ -242,31 +275,44 @@ step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s) =
     let pc = head pcs
         l_var = labs x
         l_target = l_cmd \/ l_var \/ pc
-        new_mm = eraseMultiMemory lat mm x l_target
-        new_labs y = if y == x then l_target else labs y
-    in (Stop, new_mm, new_labs, pcs, i, o, s)
+    in if (mode == Dynamic || mode == Both) && not (pc <= l_var)
+       then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at erase of "
+                 ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
+                 ++ show l_var ++ "); a conditional erase under a higher PC would "
+                 ++ "be observable at lower levels."
+       else let new_mm = eraseMultiMemory lat mm x l_target
+                new_labs y = if y == x then l_target else labs y
+            in (Stop, new_mm, new_labs, pcs, i, o, s)
 
 step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
     case filter (\f -> funcName f == fName) fns of
         [] -> error $ "Function " ++ fName ++ " not found"
         (f:_) ->
             let pc = head pcs
-                m_pc = getMem mm pc
-                vals = map (\e -> exprEval e m_pc) args
                 bottom = head (latticeLevels lat)
                 l_args = map (\e -> getExprLevel e labs bottom) args
-                
-                -- Init local memory for all levels
-                new_mm = foldl (\acc l -> 
-                            let local_m = foldl (\m' (var, val) -> update m' var val) (\_ -> 0) (zip (funcArgs f) vals)
-                            in Map.insert (lId l) local_m acc
-                         ) Map.empty (latticeLevels lat)
-                
-                -- Init local labels
+                arg_targets = map (pc \/) l_args
+
+                -- Evaluate each arg in its own target view, matching Assign/Return/If.
+                vals = zipWith (\e l_t -> exprEval e (getMem mm l_t)) args arg_targets
+
+                -- Seed the callee with a fresh all-zero MultiMemory, then write
+                -- each parameter at its target level (so a high-labeled arg's
+                -- value appears only in views >= pc \/ l_arg, not in low views).
+                empty_mm = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
+                new_mm = foldl (\acc (var, val, l_t) ->
+                                  updateMultiMemory lat acc var val l_t)
+                               empty_mm
+                               (zip3 (funcArgs f) vals arg_targets)
+
+                -- Parameters get their per-arg target level. Non-parameter
+                -- locals follow the _p / _s naming convention for their
+                -- initial label, matching how main-program variables are
+                -- initialised in runModeWithInput / quietRun.
                 new_labs y = case elemIndex y (funcArgs f) of
-                                Just idx -> (l_args !! idx) \/ pc
-                                Nothing -> bottom
-                
+                                Just idx -> arg_targets !! idx
+                                Nothing  -> levelFromName lat y
+
             in (Seq (funcBody f) Return, new_mm, new_labs, [pc], i, o, (x, mm, labs, pcs, funcReturn f) : s)
 
 step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr) : s) =
@@ -287,6 +333,8 @@ step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller
                 final_labs y = if y == x then l_target else caller_labs y
             in (Stop, final_mm, final_labs, caller_pcs, i, o, s)
 
+step _ _ _ (Halt, mm, labs, pcs, i, o, s) = (Halt, mm, labs, pcs, i, o, s)
+
 step _ _ _ (Stop, _, _, _, _, _, _) = error "impossible case"
 
 
@@ -299,6 +347,7 @@ evalF 0 _ _ _ _ = OutOfFuel
 evalF n mode lat fns config =
     let config'@(c', mm', labs', pcs', i', o', s') = step mode lat fns config
     in case c' of
+        Halt           -> Finished mm' labs' o'  -- `stop` halts regardless of stack depth
         Stop | null s' -> Finished mm' labs' o'
         _              -> evalF (n-1) mode lat fns config'
 

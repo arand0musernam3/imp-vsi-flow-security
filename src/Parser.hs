@@ -67,7 +67,7 @@ command = do
 
 statement :: LParser Cmd
 statement =  (reserved "skip" >> return Skip)
-         <|> (reserved "stop" >> return Stop)
+         <|> (reserved "stop" >> return Halt)
          <|> (reserved "input" >> parens (do
                 l <- level
                 comma
