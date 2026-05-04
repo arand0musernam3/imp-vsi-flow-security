@@ -1,73 +1,95 @@
 module Main where
 
+import Control.Exception (SomeException, try)
 import Examples
-import Parser (parseImp)
-import Types
+import Imp
+
+data Expectation = ShouldPass | ShouldFail
+    deriving (Eq, Show)
+
+runTest :: String -> ExecMode -> String -> [Value] -> Expectation -> IO Bool
+runTest name mode prog inputs expected = do
+    putStrLn ""
+    putStrLn (replicate 60 '-')
+    putStrLn $ "TEST: " ++ name
+    putStrLn (replicate 60 '-')
+    putStrLn $ "  mode:    " ++ show mode
+    putStrLn $ "  inputs:  " ++ show inputs
+    putStrLn $ "  expect:  " ++ show expected
+    putStrLn $ "  program: " ++ prog
+    putStrLn ""
+    result <- try (runStringModeWithInput mode prog inputs) :: IO (Either SomeException ())
+    let (passed, msg) = case (result, expected) of
+            (Left e,  ShouldFail) -> (True,  "expected error caught: " ++ shorten (show e))
+            (Right _, ShouldPass) -> (True,  "completed without error")
+            (Left e,  ShouldPass) -> (False, "unexpected error: " ++ shorten (show e))
+            (Right _, ShouldFail) -> (False, "expected error but program completed")
+    putStrLn ""
+    putStrLn $ "  >>> " ++ (if passed then "PASS" else "FAIL") ++ " - " ++ msg
+    return passed
+  where
+    shorten s = if length s > 250 then take 250 s ++ "..." else s
 
 main :: IO ()
 main = do
-  -- Run tests on example programs --
-  putStrLn "--- TESTS ---"
-  let progStr1 = "y_s := 42; x_p := y_s"
-  let progStr2 = "if y_s then x_p := 1 else x_p := 0"
-  let progStr3 = "while y_s do skip"
-  let progStr4 = "if y_s then { x_p := 1; x_p := 0 } else skip"
-  let progStr5 = "input(high, x); output(low, x)" -- Should be rejected
-  let progStr6 = "input(high, x); x := 42 ; z := 3 ;  output(low, x)" -- Should be accepted
-  
-  let tests = [progStr1, progStr2, progStr3, progStr4, progStr5, progStr6]
-  mapM_ (\progStr -> do
-    putStrLn $ "Testing: " ++ progStr
-    runStringTyped progStr
     putStrLn ""
-    ) tests
+    putStrLn (replicate 60 '=')
+    putStrLn "  Dynamic Monitor Regression Tests"
+    putStrLn (replicate 60 '=')
 
-  -- Input with explicit tape --
-  let progWithInput = "input(low, a); input(high, b); c := a + b; output(high, c)"
-  let inputTape = [10, 20]
-  putStrLn $ "Code: " ++ progWithInput
-  putStrLn $ "Input Tape: " ++ show inputTape
-  runStringTypedWithInput progWithInput inputTape
+    results <- sequence
+        [ runTest "NSU on assignment (branch taken, secret=1)"
+                  Dynamic
+                  "input(high, secret_s); x_p := 0; if secret_s then x_p := 1 else skip; output(low, x_p)"
+                  [1]
+                  ShouldFail
 
-  -- PDF Examples from assignment 6 --
-  putStrLn "\n--- PDF Examples ---"
-  putStrLn $ "Code: " ++ pdfExample1
-  runStringTyped pdfExample1
+        , runTest "NSU on assignment (branch not taken, secret=0)"
+                  Dynamic
+                  "input(high, secret_s); x_p := 0; if secret_s then x_p := 1 else skip; output(low, x_p)"
+                  [0]
+                  ShouldPass
 
-  putStrLn ""
-  putStrLn $ "Code: " ++ pdfExample2
-  runStringTyped pdfExample2
+        , runTest "Explicit flow on output (secret to low channel)"
+                  Dynamic
+                  "input(high, secret_s); output(low, secret_s)"
+                  [42]
+                  ShouldFail
 
-  -- Function Tests --
-  putStrLn "\n--- FUNCTION TESTS ---"
-  
-  let funcTest1 = "def inc(a) { a := a + 1 } return a; x_p := 5; y_p := call inc(x_p)"
-  putStrLn $ "Testing: " ++ funcTest1
-  runStringTyped funcTest1
+        , runTest "Output well-typed (public to low channel)"
+                  Dynamic
+                  "x_p := 7; output(low, x_p)"
+                  []
+                  ShouldPass
 
-  let funcTest2 = "def f(s) { if s then r := 1 else r := 0 } return r; x_s := 1; y_p := call f(x_s); output(low, y_p)"
-  putStrLn $ "\nTesting (Should pass): " ++ funcTest2
-  runStringTyped funcTest2
+        , runTest "Implicit flow on input (input under secret PC)"
+                  Dynamic
+                  "input(high, secret_s); if secret_s then input(low, x_p) else skip; output(low, x_p)"
+                  [1, 99]
+                  ShouldFail
 
-  let funcTest3 = "def f(s) { if s then r := 1 else r := 0 } return r; input(high, x); y_p := call f(x); output(low, y_p)"
-  putStrLn $ "\nTesting (Should fail static, run dynamic): " ++ funcTest3
-  runStringTyped funcTest3
+        , runTest "NSU on function return (high pc, public target)"
+                  Dynamic
+                  "def f(a) { skip } return a; input(high, secret_s); x_p := 0; if secret_s then x_p := call f(0) else skip; output(low, x_p)"
+                  [1]
+                  ShouldFail
 
-  -- Multi-level Erasure Tests --
-  putStrLn "\n--- MULTI-LEVEL ERASURE TESTS ---"
+        , runTest "Empty input tape (runtime error)"
+                  Dynamic
+                  "input(low, x_p); output(low, x_p)"
+                  []
+                  ShouldFail
 
-  let eraseTest1 = "x := 42; erase(high, x)"
-  putStrLn $ "Testing visibility after erase(high, x): " ++ eraseTest1
-  runStringTyped eraseTest1
+        , runTest "Untyped mode runs without monitor checks"
+                  Untyped
+                  "input(high, secret_s); output(low, secret_s)"
+                  [42]
+                  ShouldPass
+        ]
 
-  let eraseTest2 = "input(high, x); y := x; erase(high, y)"
-  putStrLn $ "\nTesting erasure of high input: " ++ eraseTest2
-  runStringTypedWithInput eraseTest2 [55]
-
-  let eraseTest3 = "x := 10; y_s := 1; if y_s then erase(high, x) else skip"
-  putStrLn $ "\nTesting erasure under secret PC: " ++ eraseTest3
-  runStringTyped eraseTest3
-
-  let eraseDiamond = "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; x := 100; erase(L1, x)"
-  putStrLn $ "\nTesting diamond erasure (x=100 visible at L1 and High, 0 at Low and L2): " ++ eraseDiamond
-  runStringTyped eraseDiamond
+    let passed = length (filter id results)
+        total  = length results
+    putStrLn ""
+    putStrLn (replicate 60 '=')
+    putStrLn $ "  Summary: " ++ show passed ++ "/" ++ show total ++ " tests passed"
+    putStrLn (replicate 60 '=')

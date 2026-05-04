@@ -2,9 +2,8 @@ module Imp where
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import Data.List (nub, elemIndex)
+import Data.List (elemIndex)
 import Algebra.Lattice
-import Debug.Trace (trace)
 
 type VarName = String
 type Value   = Integer
@@ -71,7 +70,7 @@ data Cmd = Skip | Assign VarName Expr | Seq Cmd Cmd
          | Call VarName String [Expr]
          | Return
          | Stop
-         | ResetPC Level -- Internal command to restore PC level
+         | ResetPC -- Internal command: pop the top of the PC stack on If/While exit
            deriving (Eq, Show)
 
 -- Get all variables used in a command
@@ -86,13 +85,14 @@ getVars cmd = Set.toList (varsCmd cmd)
     varsCmd (Assign x e) = Set.insert x (varsExpr e)
     varsCmd (Seq c1 c2) = Set.union (varsCmd c1) (varsCmd c2)
     varsCmd (If e c1 c2) = Set.unions [varsExpr e, varsCmd c1, varsCmd c2]
-    varsCmd (While e c) = Set.union (varsCmd c) (varsCmd c)
+    varsCmd (While e c) = Set.union (varsExpr e) (varsCmd c)
     varsCmd (Input _ x) = Set.singleton x
     varsCmd (Output _ e) = varsExpr e
     varsCmd (Erase _ x) = Set.singleton x
     varsCmd (Call x _ args) = Set.insert x (Set.unions (map varsExpr args))
     varsCmd Return = Set.empty
     varsCmd Stop = Set.empty
+    varsCmd ResetPC = Set.empty
 
 -- Memory is a function from Variables to Values
 type Memory = VarName -> Value
@@ -110,6 +110,8 @@ update m x v = \y -> if y == x then v else m y
 -- Configuration includes current command, multi-memory, labels, PC stack, input, output, and call stack
 type Stack = [(VarName, MultiMemory, Labels, [Level], Expr)]
 type Configuration = (Cmd, MultiMemory, Labels, [Level], [Value], [Value], Stack)
+
+data ExecMode = Untyped | Static | Dynamic | Both deriving (Eq, Show)
 
 -- Helper to get the current memory view for a level
 getMem :: MultiMemory -> Level -> Memory
@@ -160,62 +162,83 @@ exprEval (BinOpExpr binop e1 e2) m =
 
 -- SMALL-STEP SEMANTICS OF COMMANDS
 
-step :: SecurityLattice -> [Function] -> Configuration -> Configuration
+step :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Configuration
 
-step _ _ (Skip, mm, labs, pcs, i, o, s) = (Stop, mm, labs, pcs, i, o, s)
-
-step lat _ (Assign x e, mm, labs, pcs, i, o, s) =
+step _ _ _ (Skip, mm, labs, pcs, i, o, s) = (Stop, mm, labs, pcs, i, o, s)
+step mode lat _ (Assign x e, mm, labs, pcs, i, o, s) =
     let pc = head pcs
-        m_pc = getMem mm pc
-        v = exprEval e m_pc
         bottom = head (latticeLevels lat)
         l_e = getExprLevel e labs bottom
         l_target = pc \/ l_e
-        new_mm = updateMultiMemory lat mm x v l_target
-        new_labs y = if y == x then l_target else labs y
-    in (Stop, new_mm, new_labs, pcs, i, o, s)
+        -- Evaluate the RHS at the target view so values from higher-labeled
+        -- variables are read correctly (matches the choice in step If).
+        v = exprEval e (getMem mm l_target)
+        cur_lab = labs x
+    in if (mode == Dynamic || mode == Both) && not (pc <= cur_lab)
+       then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at assignment to "
+                 ++ x ++ ". Current label of " ++ x ++ " is " ++ show cur_lab
+                 ++ " but PC is " ++ show pc ++ "; " ++ show pc
+                 ++ " does not flow to " ++ show cur_lab ++ "."
+       else let new_mm = updateMultiMemory lat mm x v l_target
+                new_labs y = if y == x then l_target else labs y
+            in (Stop, new_mm, new_labs, pcs, i, o, s)
 
-step lat fns (Seq c1 c2, mm, labs, pcs, i, o, s) =
-    let (c1', mm', labs', pcs', i', o', s') = step lat fns (c1, mm, labs, pcs, i, o, s)
+step mode lat fns (Seq c1 c2, mm, labs, pcs, i, o, s) =
+    let (c1', mm', labs', pcs', i', o', s') = step mode lat fns (c1, mm, labs, pcs, i, o, s)
     in case c1' of
           Stop -> (c2, mm', labs', pcs', i', o', s')
           _    -> (Seq c1' c2, mm', labs', pcs', i', o', s')
 
-step lat _ (If e c1 c2, mm, labs, pcs, i, o, s) =
+step _ lat _ (If e c1 c2, mm, labs, pcs, i, o, s) =
     let pc = head pcs
-        m_pc = getMem mm pc
         bottom = head (latticeLevels lat)
         l_e = getExprLevel e labs bottom
         new_pc = pc \/ l_e
-    in case exprEval e m_pc of
-        0 -> (Seq c2 (ResetPC pc), mm, labs, new_pc : pcs, i, o, s)
-        _ -> (Seq c1 (ResetPC pc), mm, labs, new_pc : pcs, i, o, s)
+        -- Evaluate condition using the memory view of the upgraded PC
+        m_new_pc = getMem mm new_pc
+    in case exprEval e m_new_pc of
+        0 -> (Seq c2 ResetPC, mm, labs, new_pc : pcs, i, o, s)
+        _ -> (Seq c1 ResetPC, mm, labs, new_pc : pcs, i, o, s)
 
-step _ _ (ResetPC old_pc, mm, labs, (_:pcs), i, o, s) = (Stop, mm, labs, old_pc : pcs, i, o, s)
-step _ _ (ResetPC _, _, _, [], _, _, _) = error "PC stack underflow"
+step _ _ _ (ResetPC, mm, labs, (_:pcs), i, o, s) = (Stop, mm, labs, pcs, i, o, s)
+step _ _ _ (ResetPC, _, _, [], _, _, _) = error "PC stack underflow"
 
-step lat _ (While e c, mm, labs, pcs, i, o, s) = 
+step mode lat _ (While e c, mm, labs, pcs, i, o, s) = 
     (If e (Seq c (While e c)) Skip, mm, labs, pcs, i, o, s)
 
-step lat _ (Input ch x, mm, labs, pcs, i, [], s) = 
+step mode lat _ (Input ch x, mm, labs, pcs, i, o, s) =
     let pc = head pcs
         l_target = ch \/ pc
-        new_mm = updateMultiMemory lat mm x 0 l_target
-        new_labs y = if y == x then l_target else labs y
-    in (Stop, new_mm, new_labs, pcs, i, [], s)
-step lat _ (Input ch x, mm, labs, pcs, (v:vs), o, s) =
-    let pc = head pcs
-        l_target = ch \/ pc
-        new_mm = updateMultiMemory lat mm x v l_target
-        new_labs y = if y == x then l_target else labs y
-    in (Stop, new_mm, new_labs, pcs, vs, o, s)
+        monitorOn = mode == Dynamic || mode == Both
+    in if monitorOn && not (pc <= ch)
+       then error $ "Dynamic Monitor Exception: side-channel violation at input from channel "
+                 ++ show ch ++ ". PC (" ++ show pc ++ ") does not flow to channel "
+                 ++ show ch ++ "."
+       else if monitorOn && not (pc <= labs x)
+       then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at input to "
+                 ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
+                 ++ show (labs x) ++ ")."
+       else case i of
+            [] -> error $ "Runtime error: input tape exhausted at input to " ++ x
+                       ++ " on channel " ++ show ch ++ "."
+            (v:vs) ->
+                let new_mm = updateMultiMemory lat mm x v l_target
+                    new_labs y = if y == x then l_target else labs y
+                in (Stop, new_mm, new_labs, pcs, vs, o, s)
 
-step lat _ (Output ch e, mm, labs, pcs, i, o, s) =
+step mode lat _ (Output ch e, mm, labs, pcs, i, o, s) =
     let m_ch = getMem mm ch
         v = exprEval e m_ch
-    in (Stop, mm, labs, pcs, i, o ++ [v], s)
+        bottom = head (latticeLevels lat)
+        l_e = getExprLevel e labs bottom
+        pc = head pcs
+    in if (mode == Dynamic || mode == Both) && not ((l_e \/ pc) <= ch)
+       then error $ "Dynamic Monitor Exception: information flow violation at output to channel "
+                 ++ show ch ++ ". Expression label (" ++ show l_e ++ ") joined with PC ("
+                 ++ show pc ++ ") is not <= channel label " ++ show ch ++ "."
+       else (Stop, mm, labs, pcs, i, o ++ [v], s)
 
-step lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s) =
+step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s) =
     let pc = head pcs
         l_var = labs x
         l_target = l_cmd \/ l_var \/ pc
@@ -223,7 +246,7 @@ step lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s) =
         new_labs y = if y == x then l_target else labs y
     in (Stop, new_mm, new_labs, pcs, i, o, s)
 
-step lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
+step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
     case filter (\f -> funcName f == fName) fns of
         [] -> error $ "Function " ++ fName ++ " not found"
         (f:_) ->
@@ -246,32 +269,38 @@ step lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
                 
             in (Seq (funcBody f) Return, new_mm, new_labs, [pc], i, o, (x, mm, labs, pcs, funcReturn f) : s)
 
-step lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr) : s) =
-    let pc = head pcs
-        m_pc = getMem mm pc
-        v = exprEval ret_expr m_pc
+step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr) : s) =
+    let pc = head pcs                       -- callee's final PC
+        caller_pc = head caller_pcs         -- caller's PC at the call site
         bottom = head (latticeLevels lat)
         l_ret = getExprLevel ret_expr labs bottom
-        l_target = l_ret \/ pc
-        
-        final_mm = updateMultiMemory lat caller_mm x v l_target
-        final_labs y = if y == x then l_target else caller_labs y
-    in (Stop, final_mm, final_labs, caller_pcs, i, o, s)
+        -- Per Hedin/Sabelfeld and Austin/Flanagan, the return assignment runs
+        -- under the caller's PC; the value depends on the callee's PC and l_ret.
+        l_target = l_ret \/ pc \/ caller_pc
+        -- Evaluate the return expression at the target view (matches Assign / If).
+        v = exprEval ret_expr (getMem mm l_target)
+    in if (mode == Dynamic || mode == Both) && not (caller_pc <= caller_labs x)
+       then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at function return to "
+                 ++ x ++ ". Caller PC (" ++ show caller_pc
+                 ++ ") is not <= Current Label (" ++ show (caller_labs x) ++ ")."
+       else let final_mm = updateMultiMemory lat caller_mm x v l_target
+                final_labs y = if y == x then l_target else caller_labs y
+            in (Stop, final_mm, final_labs, caller_pcs, i, o, s)
 
-step _ _ (Stop, _, _, _, _, _, _) = error "impossible case"
+step _ _ _ (Stop, _, _, _, _, _, _) = error "impossible case"
 
 
 -- INFRASTRUCTURE
 
 data Result = Finished MultiMemory Labels [Value] | OutOfFuel
 
-evalF :: Integer -> SecurityLattice -> [Function] -> Configuration -> Result
-evalF 0 _ _ _ = OutOfFuel
-evalF n lat fns config =
-    let config'@(c', mm', labs', pcs', i', o', s') = step lat fns config
+evalF :: Integer -> ExecMode -> SecurityLattice -> [Function] -> Configuration -> Result
+evalF 0 _ _ _ _ = OutOfFuel
+evalF n mode lat fns config =
+    let config'@(c', mm', labs', pcs', i', o', s') = step mode lat fns config
     in case c' of
         Stop | null s' -> Finished mm' labs' o'
-        _              -> evalF (n-1) lat fns config'
+        _              -> evalF (n-1) mode lat fns config'
 
 
 -- print variables in vars on screen with their security level
@@ -287,8 +316,8 @@ printMultiMem mm labs lat vars = do
         ) (latticeLevels lat)
 
 -- run program with fuel n and print the variable values and output
-runF n lat fns vars (c, mm, labs, pcs, i, o, s) =
-    case evalF n lat fns (c, mm, labs, pcs, i, o, s) of
+runF n mode lat fns vars (c, mm, labs, pcs, i, o, s) =
+    case evalF n mode lat fns (c, mm, labs, pcs, i, o, s) of
         OutOfFuel  -> print "OutOfFuel"
         Finished mm' labs' o' -> do
             printMultiMem mm' labs' lat vars
