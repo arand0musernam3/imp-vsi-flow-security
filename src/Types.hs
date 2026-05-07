@@ -60,33 +60,22 @@ lowL    = (latticeLevels stdLattice) !! 1
 highL   = (latticeLevels stdLattice) !! 2
 topL    = (latticeLevels stdLattice) !! 3
 
--- Mapping for examples
-public = lowL
-secret = highL
-
--- convenient synonyms
-(⊔) :: Level -> Level -> Level
-(⊔) = (\/)
-
-(⊑) :: Level -> Level -> Bool
-(⊑) = (<=)
-
 -- Flow-sensitive environment
 updateEnv :: Environment -> VarName -> Level -> Environment
 updateEnv env x l = \y -> if y == x then l else env y
 
 joinEnv :: Environment -> Environment -> Environment
-joinEnv env1 env2 = \x -> (env1 x) ⊔ (env2 x)
+joinEnv env1 env2 = \x -> (env1 x) \/ (env2 x)
 
 envFlowsTo :: [VarName] -> Environment -> Environment -> Bool
-envFlowsTo vars env1 env2 = all (\x -> (env1 x) ⊑ (env2 x)) vars
+envFlowsTo vars env1 env2 = all (\x -> (env1 x) <= (env2 x)) vars
 
 -- Expression Typing
 exprType :: Environment -> Expr -> Level
 exprType _   (IntExpr _ ) = bottomL -- Literals are bottom (public)
 exprType env (VarExpr x ) = env x
 exprType env (BinOpExpr _ e1 e2) =
-    (exprType env e1) ⊔ (exprType env e2)
+    (exprType env e1) \/ (exprType env e2)
 
 data TypeRes = WellTyped Environment | TypeError String
 
@@ -99,7 +88,7 @@ cmdType' fns summaries vars env pc cmd = case cmd of
     Skip -> WellTyped env
     Assign x e ->
         let l = exprType env e
-            l' = pc ⊔ l
+            l' = pc \/ l
         in WellTyped (updateEnv env x l')
     Seq c1 c2 ->
         case cmdType' fns summaries vars env pc c1 of
@@ -107,7 +96,7 @@ cmdType' fns summaries vars env pc cmd = case cmd of
             err            -> err
     If e c1 c2 ->
         let l = exprType env e
-            pc' = pc ⊔ l
+            pc' = pc \/ l
         in case cmdType' fns summaries vars env pc' c1 of
             WellTyped env1' -> case cmdType' fns summaries vars env pc' c2 of
                 WellTyped env2' -> WellTyped (joinEnv env1' env2')
@@ -115,7 +104,7 @@ cmdType' fns summaries vars env pc cmd = case cmd of
             err -> err
     While e c ->
         let l = exprType env e
-            pc' = pc ⊔ l
+            pc' = pc \/ l
         in case cmdType' fns summaries vars env pc' c of
             WellTyped env' -> 
                 if envFlowsTo vars env' env
@@ -123,17 +112,17 @@ cmdType' fns summaries vars env pc cmd = case cmd of
                    else TypeError "While loop body changes environment unpredictably"
             err -> err
     Input ch x ->
-        if not (pc ⊑ ch)
+        if not (pc <= ch)
         then TypeError $ "Input failed: pc (" ++ show pc ++ ") does not flow to channel (" ++ show ch ++ ")"
-        else WellTyped (updateEnv env x (ch ⊔ pc))
+        else WellTyped (updateEnv env x (ch \/ pc))
     Output ch e ->
         let l = exprType env e
-        in if not ((pc ⊔ l) ⊑ ch)
-        then TypeError $ "Output failed: (pc join expr) (" ++ show (pc ⊔ l) ++ ") does not flow to channel (" ++ show ch ++ ")"
+        in if not ((pc \/ l) <= ch)
+        then TypeError $ "Output failed: (pc join expr) (" ++ show (pc \/ l) ++ ") does not flow to channel (" ++ show ch ++ ")"
         else WellTyped env
     Erase l_cmd x ->
         let l_var = env x
-            l' = l_cmd ⊔ l_var ⊔ pc
+            l' = l_cmd \/ l_var \/ pc
         in WellTyped (updateEnv env x l')
     Call x fName args ->
         case filter (\f -> funcName f == fName) fns of
@@ -141,7 +130,7 @@ cmdType' fns summaries vars env pc cmd = case cmd of
             (_:_) ->
                 let argLevels = map (exprType env) args
                 in case Map.lookup (fName, argLevels, pc) summaries of
-                    Just retLevel -> WellTyped (updateEnv env x (pc ⊔ retLevel))
+                    Just retLevel -> WellTyped (updateEnv env x (pc \/ retLevel))
                     Nothing -> TypeError $ "Function " ++ fName
                               ++ " is not well-typed for argument levels "
                               ++ show argLevels ++ " under PC " ++ show pc

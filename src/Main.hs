@@ -19,7 +19,7 @@ quietRun mode prog inputs = case parseImp prog of
         let bot       = head (latticeLevels lat)
             initLabs  = levelFromName lat
             initialMM = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
-        in case evalF 1000 mode lat fns
+        in case evalF 1000 mode lat fns                                             -- 1000 fuel
                        (mainCmd, initialMM, initLabs, [bot], inputs, [], []) of
             Finished _ _ o -> return o
             OutOfFuel      -> error "OutOfFuel"
@@ -266,7 +266,21 @@ main = do
                        "def f(a) { tmp := a } return tmp; y_p := call f(7); output(low, y_p)"
                        []
                        [7]
+        , runTest "Run custom lattice program - diamond lattice"
+                    Both
+                    "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); input(L2, y); z := x + y; output(High, z)"
+                    [3, 4]
+                    ShouldPass
+        , runTest "Run custom lattice program - diamond lattice"
+                    Dynamic
+                    "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); output(L2, x)"
+                    [3, 4]
+                    ShouldFail
         ]
+
+
+-- TODO make examples with custom lattices.
+-- TODO properly make sure that naming comvention is turned off for custom lattices and function parameters - (_s, _p).
 
     let passed = length (filter id results)
         total  = length results

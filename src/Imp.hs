@@ -278,7 +278,7 @@ step mode lat _ (Output ch e, mm, labs, pcs, i, o, s) =
 step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s) =
     let pc = head pcs
         l_var = labs x
-        l_target = l_cmd \/ l_var \/ pc
+        l_target = l_cmd \/ l_var \/ pc -- target level for the variable after erasure - TODO revise if we want it like this or error based?
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (pc <= l_var)
        then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at erase of "
@@ -295,25 +295,18 @@ step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
         (f:_) ->
             let pc = head pcs
                 bottom = head (latticeLevels lat)
-                l_args = map (\e -> getExprLevel e labs bottom) args
-                arg_targets = map (pc \/) l_args
+                l_args = map (\e -> getExprLevel e labs bottom) args -- Arguments levels
+                arg_targets = map (pc \/) l_args -- Raises each arg level to at least pc.
 
-                -- Evaluate each arg in its own target view, matching Assign/Return/If.
-                vals = zipWith (\e l_t -> exprEval e (getMem mm l_t)) args arg_targets
+                vals = zipWith (\e l_t -> exprEval e (getMem mm l_t)) args arg_targets --Evaluate each argument 
 
-                -- Seed the callee with a fresh all-zero MultiMemory, then write
-                -- each parameter at its target level (so a high-labeled arg's
-                -- value appears only in views >= pc \/ l_arg, not in low views).
-                empty_mm = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
+
+                empty_mm = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ] -- Empty_memory for the function
                 new_mm = foldl (\acc (var, val, l_t) ->
                                   updateMultiMemory lat acc var val l_t)
                                empty_mm
-                               (zip3 (funcArgs f) vals arg_targets)
+                               (zip3 (funcArgs f) vals arg_targets) -- Update the memory with the function arguments value (vals)
 
-                -- Parameters get their per-arg target level. Non-parameter
-                -- locals follow the _p / _s naming convention for their
-                -- initial label, matching how main-program variables are
-                -- initialised in runModeWithInput / quietRun.
                 new_labs y = case elemIndex y (funcArgs f) of
                                 Just idx -> arg_targets !! idx
                                 Nothing  -> levelFromName lat y
@@ -321,15 +314,13 @@ step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s) =
             in (Seq (funcBody f) Return, new_mm, new_labs, [pc], i, o, (x, mm, labs, pcs, funcReturn f) : s)
 
 step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr) : s) =
-    let pc = head pcs                       -- callee's final PC
-        caller_pc = head caller_pcs         -- caller's PC at the call site
+    let pc = head pcs                       -- callee PC
+        caller_pc = head caller_pcs         -- caller PC
         bottom = head (latticeLevels lat)
         l_ret = getExprLevel ret_expr labs bottom
-        -- Per Hedin/Sabelfeld and Austin/Flanagan, the return assignment runs
-        -- under the caller's PC; the value depends on the callee's PC and l_ret.
-        l_target = l_ret \/ pc \/ caller_pc
-        -- Evaluate the return expression at the target view (matches Assign / If).
-        v = exprEval ret_expr (getMem mm l_target)
+        -- Per Hedin/Sabelfeld and Austin/Flanagan
+        l_target = l_ret \/ pc \/ caller_pc -- l_target is the pc of caller and callee joined with the l_ret
+        v = exprEval ret_expr (getMem mm l_target) -- value of ret expression
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (caller_pc <= caller_labs x)
        then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at function return to "
@@ -342,7 +333,6 @@ step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller
 step _ _ _ (Halt, mm, labs, pcs, i, o, s) = (Halt, mm, labs, pcs, i, o, s)
 
 step _ _ _ (Stop, _, _, _, _, _, _) = error "impossible case"
-
 
 -- INFRASTRUCTURE
 
