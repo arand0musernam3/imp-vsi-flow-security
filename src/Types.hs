@@ -95,7 +95,7 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
     Skip -> WellTyped env infl
     Assign x e ->
         let l = exprType env e
-            l' = pc \/ l
+            l' = pc \/ l \/ env x
             new_infl = Map.insert x (Set.union (varsExpr e) pc_vars) infl
         in WellTyped (updateEnv env x l') new_infl
     Seq c1 c2 ->
@@ -125,7 +125,7 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
         if not (pc <= ch)
         then TypeError $ "Input failed: pc (" ++ show pc ++ ") does not flow to channel (" ++ show ch ++ ")"
         else let new_infl = Map.insert x pc_vars infl
-             in WellTyped (updateEnv env x (ch \/ pc)) new_infl
+             in WellTyped (updateEnv env x (ch \/ pc \/ env x)) new_infl
     Output ch e ->
         let l = exprType env e
         in if not ((pc \/ l) <= ch)

@@ -2,8 +2,9 @@ module Imp where
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import Data.List (elemIndex, isSuffixOf)
+import Data.List (elemIndex, intercalate, isSuffixOf)
 import Algebra.Lattice
+import Control.Monad (when)
 
 type VarName = String
 type Value   = Integer
@@ -119,7 +120,7 @@ update m x v = \y -> if y == x then v else m y
 type PCContext = (Level, Set.Set VarName)
 type Influences = Map.Map VarName (Set.Set VarName)
 type Stack = [(VarName, MultiMemory, Labels, [PCContext], Expr, Influences)]
-type Configuration = (Cmd, MultiMemory, Labels, [PCContext], [Value], [Value], Stack, Influences)
+type Configuration = (Cmd, MultiMemory, Labels, [PCContext], [Value], [(Level, Value)], Stack, Influences)
 
 data ExecMode = Untyped | Static | Dynamic | Both deriving (Eq, Show)
 
@@ -142,7 +143,7 @@ updateMultiMemory lat mm x v targetLevel =
 eraseMultiMemory :: SecurityLattice -> MultiMemory -> VarName -> Level -> MultiMemory
 eraseMultiMemory lat mm x targetLevel =
     foldl (\acc l ->
-                if l <= targetLevel
+                if not (targetLevel <= l)
                 then Map.insert (lId l) (update (getMem acc l) x 0) acc
                 else acc)
           mm (latticeLevels lat)
@@ -218,7 +219,7 @@ step mode lat _ (Assign x e, mm, labs, pcs, i, o, s, infl) =
         pc_vars = getPCVars pcs
         bottom = head (latticeLevels lat)
         l_e = getExprLevel e labs bottom
-        l_target = pc \/ l_e
+        l_target = pc \/ l_e \/ labs x
         v = exprEval e (getMem mm l_target)
         cur_lab = labs x
         monitorOn = mode == Dynamic || mode == Both
@@ -264,7 +265,7 @@ step mode lat _ (While e c, mm, labs, pcs, i, o, s, infl) =
 step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
     let pc = getPCLevel pcs
         pc_vars = getPCVars pcs
-        l_target = ch \/ pc
+        l_target = ch \/ pc \/ labs x
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (pc <= ch)
        then error $ "Dynamic Monitor Exception: side-channel violation at input from channel "
@@ -300,7 +301,7 @@ step mode lat _ (Output ch e, mm, labs, pcs, i, o, s, infl) =
        then error $ "Dynamic Monitor Exception: information flow violation at output to channel "
                  ++ show ch ++ ". Expression label (" ++ show l_e ++ ") joined with PC ("
                  ++ show pc ++ ") is not <= channel label " ++ show ch ++ "."
-       else (Stop, mm, labs, pcs, i, o ++ [v], s, infl)
+       else (Stop, mm, labs, pcs, i, o ++ [(ch, v)], s, infl)
 
 step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s, infl) =
     let pc = getPCLevel pcs
@@ -355,7 +356,7 @@ step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller
         caller_pc_vars = getPCVars caller_pcs
         bottom = head (latticeLevels lat)
         l_ret = getExprLevel ret_expr labs bottom
-        l_target = l_ret \/ pc \/ caller_pc
+        l_target = l_ret \/ pc \/ caller_pc \/ caller_labs x
         v = exprEval ret_expr (getMem mm l_target)
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (caller_pc <= caller_labs x)
@@ -380,15 +381,15 @@ step _ _ _ (Stop, _, _, _, _, _, _, _) = error "impossible case"
 
 -- INFRASTRUCTURE
 
-data Result = Finished MultiMemory Labels [Value] | OutOfFuel
+data Result = Finished MultiMemory Labels [(Level, Value)] Influences | OutOfFuel
 
 evalF :: Integer -> ExecMode -> SecurityLattice -> [Function] -> Configuration -> Result
 evalF 0 _ _ _ _ = OutOfFuel
 evalF n mode lat fns config =
     let config'@(c', mm', labs', pcs', i', o', s', infl') = step mode lat fns config
     in case c' of
-        Halt           -> Finished mm' labs' o'  -- `stop` halts regardless of stack depth
-        Stop | null s' -> Finished mm' labs' o'
+        Halt           -> Finished mm' labs' o' infl' -- `stop` halts regardless of stack depth
+        Stop | null s' -> Finished mm' labs' o' infl'
         _              -> evalF (n-1) mode lat fns config'
 
 
@@ -404,10 +405,49 @@ printMultiMem mm labs lat vars = do
         mapM_ (\x -> putStrLn $ "  " ++ x ++ ": " ++ show (m x)) vars
         ) (latticeLevels lat)
 
+printSecurityReport :: SecurityLattice -> [VarName] -> MultiMemory -> Labels -> [(Level, Value)] -> Influences -> IO ()
+printSecurityReport lat vars mm labs outputs infl = do
+    let levels = latticeLevels lat
+        obsW   = maximum (1 : map (length . show) levels)
+        nameW  = maximum (4 : map length vars)
+        labW   = maximum (5 : map (length . show . labs) vars)
+        valW   = maximum (6 : map (length . show) levels
+                            ++ [ length (show (getMem mm l x)) | x <- vars, l <- levels ])
+    putStrLn "  -- Security Report ----------------------------------------"
+    putStrLn "  Outputs (by observer)"
+    putStrLn $ "    " ++ padR (9 + obsW) "emitted" ++ " : " ++ show outputs
+    mapM_ (\l ->
+        let visible = [ v | (ch, v) <- outputs, ch <= l ]
+        in putStrLn $ "    observer " ++ padR obsW (show l) ++ " : " ++ show visible
+        ) levels
+    putStrLn ""
+    putStrLn "  Variable Visibility (final state)"
+    let hdr = "    " ++ padR nameW "name" ++ "  " ++ padR labW "label"
+              ++ concatMap (\l -> padL (valW + 1) (show l)) levels
+    putStrLn hdr
+    mapM_ (\x ->
+        let row = "    " ++ padR nameW x ++ "  " ++ padR labW (show (labs x))
+                  ++ concatMap (\l -> padL (valW + 1) (show (getMem mm l x))) levels
+        in putStrLn row
+        ) vars
+    putStrLn ""
+    putStrLn "  Influences"
+    mapM_ (\x ->
+        let deps    = Map.findWithDefault Set.empty x infl
+            depsStr = if Set.null deps
+                      then "\8709"
+                      else "{ " ++ intercalate ", " (Set.toList deps) ++ " }"
+        in putStrLn $ "    " ++ x ++ "  \8592  " ++ depsStr
+        ) vars
+    putStrLn ""
+  where
+    padR n s = s ++ replicate (max 0 (n - length s)) ' '
+    padL n s = replicate (max 0 (n - length s)) ' ' ++ s
+
 -- run program with fuel n and print the variable values and output
-runF n mode lat fns vars (c, mm, labs, pcs, i, o, s, infl) =
+runF n showReport mode lat fns vars (c, mm, labs, pcs, i, o, s, infl) =
     case evalF n mode lat fns (c, mm, labs, pcs, i, o, s, infl) of
         OutOfFuel  -> print "OutOfFuel"
-        Finished mm' labs' o' -> do
-            printMultiMem mm' labs' lat vars
-            putStrLn $ "Output: " ++ show o'
+        Finished mm' labs' o' infl' -> do
+            putStrLn $ "Output: " ++ show (map snd o')
+            when showReport $ printSecurityReport lat vars mm' labs' o' infl'
