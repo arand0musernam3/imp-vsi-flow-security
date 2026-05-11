@@ -4,6 +4,7 @@ import Imp
 import Types
 import Parser (parseImp)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 -- EXAMPLES
 -- Memory environments with different secrets
@@ -54,7 +55,10 @@ runModeWithInput mode prog@(Program lat fns p) inputs = do
     -- Initial MultiMemory (empty for all levels)
     let initialMultiMemory = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
     
-    let execute = runF 100 mode lat fns vars (p, initialMultiMemory, initialLabels, [bottom], inputs, [], [])
+    let initialPC = (bottom, Set.empty)
+    let initialInfluences = Map.empty
+    
+    let execute = runF 100 mode lat fns vars (p, initialMultiMemory, initialLabels, [initialPC], inputs, [], [], initialInfluences)
 
     case mode of
         Untyped -> do
@@ -67,7 +71,7 @@ runModeWithInput mode prog@(Program lat fns p) inputs = do
             putStrLn "--- Mode: STATIC TYPING ONLY ---"
             let staticEnv = initEnv lat vars
             case cmdType lat fns vars staticEnv bottom p of 
-                WellTyped _ -> do
+                WellTyped _ _ -> do
                     putStrLn "--- Static Analysis: WELL-TYPED ---"
                     execute
                 TypeError msg -> do
@@ -78,7 +82,7 @@ runModeWithInput mode prog@(Program lat fns p) inputs = do
             putStrLn "--- Mode: BOTH STATIC AND DYNAMIC ---"
             let staticEnv = initEnv lat vars
             case cmdType lat fns vars staticEnv bottom p of 
-                WellTyped _ -> do
+                WellTyped _ _ -> do
                     putStrLn "--- Static Analysis: WELL-TYPED ---"
                     execute
                 TypeError msg -> do

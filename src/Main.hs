@@ -6,6 +6,7 @@ import Examples
 import Imp
 import Parser (parseImp)
 import Types (cmdType, initEnv, TypeRes (..))
+import qualified Data.Set as Set
 -- levelFromName comes from Imp (in scope via the unqualified Imp import above)
 
 data Expectation = ShouldPass | ShouldFail
@@ -19,8 +20,10 @@ quietRun mode prog inputs = case parseImp prog of
         let bot       = head (latticeLevels lat)
             initLabs  = levelFromName lat
             initialMM = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
-        in case evalF 1000 mode lat fns                                             -- 1000 fuel
-                       (mainCmd, initialMM, initLabs, [bot], inputs, [], []) of
+            initialPC = (bot, Set.empty)
+            initialInfluences = Map.empty
+        in case evalF 1000 mode lat fns -- 1000 fuel
+                       (mainCmd, initialMM, initLabs, [initialPC], inputs, [], [], initialInfluences) of
             Finished _ _ o -> return o
             OutOfFuel      -> error "OutOfFuel"
 
@@ -43,7 +46,7 @@ runStaticTest name prog expected = do
                     env  = initEnv lat vars
                     bot  = head (latticeLevels lat)
                 in case cmdType lat fns vars env bot mainCmd of
-                    WellTyped _   -> Right ()
+                    WellTyped _ _ -> Right ()
                     TypeError msg -> Left msg
     let (passed, msg) = case (result, expected) of
             (Left e,  ShouldFail) -> (True,  "rejected: " ++ shortenS e)
@@ -276,11 +279,81 @@ main = do
                     "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); output(L2, x)"
                     [3, 4]
                     ShouldFail
+
+        -- DEEP ERASURE TESTS
+
+        , runValueTest "Deep Erasure: data flow (x depends on y)"
+                       Dynamic
+                       "input(high, y_s); x_s := y_s; erase(top, y_s); output(top, x_s)"
+                       [42]
+                       [0]  -- x_s should be erased because it depends on y_s
+
+        , runValueTest "Deep Erasure: control flow (x depends on y via PC)"
+                       Dynamic
+                       "input(high, y_s); x_s := y_s; if y_s then x_s := 1 else skip; erase(top, y_s); output(top, x_s)"
+                       [1]
+                       [0]  -- x_s should be erased because it was assigned under a PC influenced by y_s
+
+        , runValueTest "Deep Erasure: dependency removal on overwrite"
+                       Dynamic
+                       "input(high, y_s); x_p := y_s; x_p := 7; erase(high, y_s); output(low, x_p)"
+                       [42]
+                       [7]  -- x_p should NOT be erased because it was overwritten
+
+        , runStaticTest "Deep Erasure: static rejection of leak after erasure"
+                        "input(high, y_s); x_p := y_s; erase(high, y_s); output(low, x_p)"
+                        ShouldFail -- x_p is raised to high by deep erasure, so output(low) fails
+
+        , runValueTest "Deep Erasure: transitivity (z depends on x depends on y)"
+                       Dynamic
+                       "input(high, y_s); x_s := y_s; z_s := x_s; erase(top, y_s); output(top, z_s)"
+                       [42]
+                       [0] -- z_s should be erased
+
+        -- MORE EDGE CASES
+        , runValueTest "Deep Erasure: circular dependency (x:=y; y:=x; erase y)"
+                       Dynamic
+                       "input(high, y_s); x_s := y_s; y_s := x_s; erase(top, y_s); output(top, x_s)"
+                       [42]
+                       [0] -- x_s should be erased because it transitively depends on y_s
+
+        , runValueTest "Deep Erasure: multiple influences (x:=y+z; erase y)"
+                       Dynamic
+                       "input(high, y_s); input(high, z_s); x_s := y_s + z_s; erase(top, y_s); output(top, x_s)"
+                       [10, 20]
+                       [0] -- x_s should be erased because it depends on y_s (even though z_s is fine)
+
+        , runValueTest "Deep Erasure: erasure inside function affects caller result"
+                       Dynamic
+                       "def f(a) { erase(top, a) } return a; input(high, y_s); x_s := call f(y_s); output(top, x_s)"
+                       [42]
+                       [0] -- x_s should be 0 because 'a' was erased inside the function before return
+
+        , runValueTest "Deep Erasure: while loop dependency (x incremented based on y)"
+                       Dynamic
+                       "input(high, y_s); x_s := y_s; while y_s do (x_s := x_s + 1; y_s := y_s - 1); erase(top, y_s); output(top, x_s)"
+                       [3]
+                       [0] -- x_s was modified under PC influenced by y_s, so it depends on y_s
+
+        , runValueTest "Deep Erasure: conditional erasure (erase only if z is true)"
+                       Dynamic
+                       "input(high, y_s); input(low, z_p); x_s := y_s; if z_p then erase(top, y_s) else skip; output(top, x_s)"
+                       [42, 0]
+                       [42] -- z_p is false, so no erasure should happen
+
+        , runValueTest "Deep Erasure: conditional erasure (taken)"
+                       Dynamic
+                       "input(high, y_s); input(low, z_p); x_s := y_s; if z_p then erase(top, y_s) else skip; output(top, x_s)"
+                       [42, 1]
+                       [0] -- z_p is true, so x_s should be erased via y_s
+
         ]
 
 
 -- TODO make examples with custom lattices.
 -- TODO properly make sure that naming comvention is turned off for custom lattices and function parameters - (_s, _p).
+-- TODO refine how the output tape works, which channel is it reading from? Perhaps we should have seperate tapes, one for each lattiice level?
+
 
     let passed = length (filter id results)
         total  = length results
