@@ -35,9 +35,9 @@ runCapture mode prog inputs = case parseImp prog of
 runStaticTest :: String -> String -> Expectation -> IO Bool
 runStaticTest name prog expected = do
     putStrLn ""
-    putStrLn (replicate 60 '-')
-    putStrLn $ "TEST: " ++ name
-    putStrLn (replicate 60 '-')
+    putStrLn (dim (replicate 60 '-'))
+    putStrLn $ bold "TEST: " ++ name
+    putStrLn (dim (replicate 60 '-'))
     putStrLn   "  mode:    Static (type-check only)"
     putStrLn $ "  expect:  " ++ show expected
     putStrLn $ "  program: " ++ prog
@@ -55,7 +55,7 @@ runStaticTest name prog expected = do
             (Right _, ShouldPass) -> (True,  "well-typed")
             (Left e,  ShouldPass) -> (False, "unexpected rejection: " ++ shortenS e)
             (Right _, ShouldFail) -> (False, "expected rejection but well-typed")
-    putStrLn $ "  >>> " ++ (if passed then "PASS" else "FAIL") ++ " - " ++ msg
+    putStrLn $ "  >>> " ++ (if passed then boldGreen "PASS" else boldRed "FAIL") ++ " - " ++ dim msg
     return passed
   where
     shortenS s = if length s > 250 then take 250 s ++ "..." else s
@@ -65,9 +65,9 @@ runStaticTest name prog expected = do
 runValueTest :: String -> ExecMode -> String -> [Value] -> [Value] -> Bool -> IO Bool
 runValueTest name mode prog inputs expected showReport = do
     putStrLn ""
-    putStrLn (replicate 60 '-')
-    putStrLn $ "TEST: " ++ name
-    putStrLn (replicate 60 '-')
+    putStrLn (dim (replicate 60 '-'))
+    putStrLn $ bold "TEST: " ++ name
+    putStrLn (dim (replicate 60 '-'))
     putStrLn $ "  mode:    " ++ show mode
     putStrLn $ "  inputs:  " ++ show inputs
     putStrLn $ "  expect:  output = " ++ show expected
@@ -81,13 +81,13 @@ runValueTest name mode prog inputs expected showReport = do
               | otherwise             -> (False, "expected " ++ show expected
                                                  ++ ", got " ++ show (map snd o))
             Left e -> (False, "unexpected error: " ++ shorten (show e))
-    putStrLn $ "  >>> " ++ (if passed then "PASS" else "FAIL") ++ " - " ++ msg
+    putStrLn $ "  >>> " ++ (if passed then boldGreen "PASS" else boldRed "FAIL") ++ " - " ++ dim msg
     if showReport
         then case result of
                 Right (mm, labs, o, infl, lat, vars) ->
                     printSecurityReport lat vars mm labs o infl
                 Left _ ->
-                    putStrLn "  (no security report — execution terminated with error)"
+                    putStrLn (dim "  (no security report — execution terminated with error)")
         else return ()
     return passed
   where
@@ -96,9 +96,9 @@ runValueTest name mode prog inputs expected showReport = do
 runTest :: String -> ExecMode -> String -> [Value] -> Expectation -> Bool -> IO Bool
 runTest name mode prog inputs expected showReport = do
     putStrLn ""
-    putStrLn (replicate 60 '-')
-    putStrLn $ "TEST: " ++ name
-    putStrLn (replicate 60 '-')
+    putStrLn (dim (replicate 60 '-'))
+    putStrLn $ bold "TEST: " ++ name
+    putStrLn (dim (replicate 60 '-'))
     putStrLn $ "  mode:    " ++ show mode
     putStrLn $ "  inputs:  " ++ show inputs
     putStrLn $ "  expect:  " ++ show expected
@@ -111,10 +111,10 @@ runTest name mode prog inputs expected showReport = do
             (Left e,  ShouldPass) -> (False, "unexpected error: " ++ shorten (show e))
             (Right _, ShouldFail) -> (False, "expected error but program completed")
     putStrLn ""
-    putStrLn $ "  >>> " ++ (if passed then "PASS" else "FAIL") ++ " - " ++ msg
+    putStrLn $ "  >>> " ++ (if passed then boldGreen "PASS" else boldRed "FAIL") ++ " - " ++ dim msg
     if showReport
         then case result of
-                Left _ -> putStrLn "  (no security report — execution aborted by monitor)"
+                Left _ -> putStrLn (dim "  (no security report — execution aborted by monitor)")
                 Right _ -> return ()
         else return ()
     return passed
@@ -124,9 +124,9 @@ runTest name mode prog inputs expected showReport = do
 main :: IO ()
 main = do
     putStrLn ""
-    putStrLn (replicate 60 '=')
-    putStrLn "  Dynamic Monitor Regression Tests"
-    putStrLn (replicate 60 '=')
+    putStrLn (bold (replicate 60 '='))
+    putStrLn (bold "  Dynamic Monitor Regression Tests")
+    putStrLn (bold (replicate 60 '='))
 
     results <- sequence
         [ runTest "NSU on assignment (branch taken, secret=1)"
@@ -410,6 +410,7 @@ main = do
     let passed = length (filter id results)
         total  = length results
     putStrLn ""
-    putStrLn (replicate 60 '=')
-    putStrLn $ "  Summary: " ++ show passed ++ "/" ++ show total ++ " tests passed"
-    putStrLn (replicate 60 '=')
+    putStrLn (bold (replicate 60 '='))
+    let summaryColor = if passed == total then boldGreen else boldRed
+    putStrLn $ summaryColor ("  Summary: " ++ show passed ++ "/" ++ show total ++ " tests passed")
+    putStrLn (bold (replicate 60 '='))

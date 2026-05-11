@@ -6,6 +6,24 @@ import Data.List (elemIndex, intercalate, isSuffixOf)
 import Algebra.Lattice
 import Control.Monad (when)
 
+-- ANSI color helpers (raw escape codes, no extra dependency needed)
+color :: String -> String -> String
+color code s = code ++ s ++ "\x1b[0m"
+
+bold, dim, red, green, yellow, cyan :: String -> String
+bold   = color "\x1b[1m"
+dim    = color "\x1b[2m"
+red    = color "\x1b[31m"
+green  = color "\x1b[32m"
+yellow = color "\x1b[33m"
+cyan   = color "\x1b[36m"
+
+boldRed, boldGreen, boldCyan, boldYellow :: String -> String
+boldRed    = color "\x1b[1;31m"
+boldGreen  = color "\x1b[1;32m"
+boldCyan   = color "\x1b[1;36m"
+boldYellow = color "\x1b[1;33m"
+
 type VarName = String
 type Value   = Integer
 
@@ -413,16 +431,16 @@ printSecurityReport lat vars mm labs outputs infl = do
         labW   = maximum (5 : map (length . show . labs) vars)
         valW   = maximum (6 : map (length . show) levels
                             ++ [ length (show (getMem mm l x)) | x <- vars, l <- levels ])
-    putStrLn "  -- Security Report ----------------------------------------"
-    putStrLn "  Outputs (by observer)"
+    putStrLn $ boldCyan "  -- Security Report ----------------------------------------"
+    putStrLn $ bold "  Outputs (by observer)"
     putStrLn $ "    " ++ padR (9 + obsW) "emitted" ++ " : " ++ show outputs
     mapM_ (\l ->
         let visible = [ v | (ch, v) <- outputs, ch <= l ]
         in putStrLn $ "    observer " ++ padR obsW (show l) ++ " : " ++ show visible
         ) levels
     putStrLn ""
-    putStrLn "  Variable Visibility (final state)"
-    let hdr = "    " ++ padR nameW "name" ++ "  " ++ padR labW "label"
+    putStrLn $ bold "  Variable Visibility (final state)"
+    let hdr = dim $ "    " ++ padR nameW "name" ++ "  " ++ padR labW "label"
               ++ concatMap (\l -> padL (valW + 1) (show l)) levels
     putStrLn hdr
     mapM_ (\x ->
@@ -431,7 +449,7 @@ printSecurityReport lat vars mm labs outputs infl = do
         in putStrLn row
         ) vars
     putStrLn ""
-    putStrLn "  Influences"
+    putStrLn $ bold "  Influences"
     mapM_ (\x ->
         let deps    = Map.findWithDefault Set.empty x infl
             depsStr = if Set.null deps
@@ -449,5 +467,5 @@ runF n showReport mode lat fns vars (c, mm, labs, pcs, i, o, s, infl) =
     case evalF n mode lat fns (c, mm, labs, pcs, i, o, s, infl) of
         OutOfFuel  -> print "OutOfFuel"
         Finished mm' labs' o' infl' -> do
-            putStrLn $ "Output: " ++ show (map snd o')
+            putStrLn $ bold "Output: " ++ show (map snd o')
             when showReport $ printSecurityReport lat vars mm' labs' o' infl'

@@ -63,33 +63,33 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
 
     case mode of
         Untyped -> do
-            putStrLn "--- Mode: UNTYPED (No Security) ---"
+            putStrLn (boldYellow "--- Mode: UNTYPED (No Security) ---")
             execute
         Dynamic -> do
-            putStrLn "--- Mode: DYNAMIC MONITOR ONLY ---"
+            putStrLn (boldYellow "--- Mode: DYNAMIC MONITOR ONLY ---")
             execute
         Static -> do
-            putStrLn "--- Mode: STATIC TYPING ONLY ---"
+            putStrLn (boldYellow "--- Mode: STATIC TYPING ONLY ---")
             let staticEnv = initEnv lat vars
             case cmdType lat fns vars staticEnv bottom p of
                 WellTyped _ _ -> do
-                    putStrLn "--- Static Analysis: WELL-TYPED ---"
+                    putStrLn (boldGreen "--- Static Analysis: WELL-TYPED ---")
                     execute
                 TypeError msg -> do
-                    putStrLn "--- Static Analysis: TYPE ERROR ---"
+                    putStrLn (boldRed "--- Static Analysis: TYPE ERROR ---")
                     putStrLn msg
-                    putStrLn "--- Execution Halting due to static type error ---"
+                    putStrLn (dim "--- Execution Halting due to static type error ---")
         Both -> do
-            putStrLn "--- Mode: BOTH STATIC AND DYNAMIC ---"
+            putStrLn (boldYellow "--- Mode: BOTH STATIC AND DYNAMIC ---")
             let staticEnv = initEnv lat vars
             case cmdType lat fns vars staticEnv bottom p of
                 WellTyped _ _ -> do
-                    putStrLn "--- Static Analysis: WELL-TYPED ---"
+                    putStrLn (boldGreen "--- Static Analysis: WELL-TYPED ---")
                     execute
                 TypeError msg -> do
-                    putStrLn "--- Static Analysis: TYPE ERROR ---"
+                    putStrLn (boldRed "--- Static Analysis: TYPE ERROR ---")
                     putStrLn msg
-                    putStrLn "--- Execution Halting due to static type error ---"
+                    putStrLn (dim "--- Execution Halting due to static type error ---")
 
 runStringModeWithInput :: Bool -> ExecMode -> String -> [Value] -> IO ()
 runStringModeWithInput showReport mode s inputs = case parseImp s of
