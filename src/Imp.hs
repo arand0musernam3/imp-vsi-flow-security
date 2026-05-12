@@ -2,7 +2,7 @@ module Imp where
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import Data.List (elemIndex, intercalate, isSuffixOf)
+import Data.List (elemIndex, intercalate)
 import Algebra.Lattice
 import Control.Monad (when)
 
@@ -166,25 +166,6 @@ eraseMultiMemory lat mm x targetLevel =
                 else acc)
           mm (latticeLevels lat)
 
--- Default label for a variable based on its name suffix:
---   *_p          → the lattice's "low"  level (public)
---   *_s          → the lattice's "high" level (secret)
---   anything else → the lattice's bottom level
--- The "low" / "high" levels are looked up by name in the given lattice, so
--- the convention works for custom lattices that include those names. If the
--- lattice has no level named "low" / "high", we fall back to bottom (safe
--- under-approximation; nothing flows below bottom).
-levelFromName :: SecurityLattice -> VarName -> Level
-levelFromName lat x =
-    let levels = latticeLevels lat
-        bot    = head levels
-        byName n = case filter (\l -> lName l == n) levels of
-                     (l:_) -> l
-                     []    -> bot
-    in if      "_p" `isSuffixOf` x then byName "low"
-       else if "_s" `isSuffixOf` x then byName "high"
-       else bot
-
 -- Expression level (join of all variables' labels)
 getExprLevel :: Expr -> Labels -> Level -> Level
 getExprLevel (IntExpr _) _ bottom = bottom
@@ -237,7 +218,7 @@ step mode lat _ (Assign x e, mm, labs, pcs, i, o, s, infl) =
         pc_vars = getPCVars pcs
         bottom = head (latticeLevels lat)
         l_e = getExprLevel e labs bottom
-        l_target = pc \/ l_e \/ labs x
+        l_target = pc \/ l_e
         v = exprEval e (getMem mm l_target)
         cur_lab = labs x
         monitorOn = mode == Dynamic || mode == Both
@@ -283,7 +264,7 @@ step mode lat _ (While e c, mm, labs, pcs, i, o, s, infl) =
 step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
     let pc = getPCLevel pcs
         pc_vars = getPCVars pcs
-        l_target = ch \/ pc \/ labs x
+        l_target = ch \/ pc
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (pc <= ch)
        then error $ "Dynamic Monitor Exception: side-channel violation at input from channel "
@@ -359,7 +340,7 @@ step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s, infl) =
 
                 new_labs y = case elemIndex y (funcArgs f) of
                                 Just idx -> arg_targets !! idx
-                                Nothing  -> levelFromName lat y
+                                Nothing  -> bottom
 
                 -- Callee influences: parameters depend on the variables in the arguments and caller PC
                 new_infl = Map.fromList [ (p, Set.union (varsExpr e) pc_vars)
@@ -374,7 +355,7 @@ step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller
         caller_pc_vars = getPCVars caller_pcs
         bottom = head (latticeLevels lat)
         l_ret = getExprLevel ret_expr labs bottom
-        l_target = l_ret \/ pc \/ caller_pc \/ caller_labs x
+        l_target = l_ret \/ pc \/ caller_pc
         v = exprEval ret_expr (getMem mm l_target)
         monitorOn = mode == Dynamic || mode == Both
     in if monitorOn && not (caller_pc <= caller_labs x)

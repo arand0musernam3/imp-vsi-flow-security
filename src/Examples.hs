@@ -6,40 +6,10 @@ import Parser (parseImp)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
--- EXAMPLES
--- Memory environments with different secrets
-
--- Example "initialized-to-zero" memory
+-- "Initialized-to-zero" memory, occasionally handy as a starting point.
 mZ :: Memory
 mZ = \_ -> 0
 
--- Sample programs in strings
-
--- example1: x_p := y_s
-example1 :: String
-example1 = "x_p := y_s"
-
--- example3: y_s := 42; x_p := y_s
-example3 :: String
-example3 = "y_s := 42; x_p := y_s"
-
--- example4: if y_s then x_p := 1 else x_p := 0
-example4 :: String
-example4 = "if y_s then x_p := 1 else x_p := 0"
-
--- exercise2: while y_s do skip
-exercise2 :: String
-exercise2 = "while y_s do skip"
-
--- PDF Example 1 (Rejected)
-pdfExample1 :: String
-pdfExample1 = "input(high, x); y := 0; if x then output(low, y) else output(low, y)"
-
--- PDF Example 2 (Rejected)
-pdfExample2 :: String
-pdfExample2 = "input(high, x); y := 0; if x then output(low, y) else skip"
-
----
 -- Helper functions to run programs
 
 -- Run program with specified security mode
@@ -50,8 +20,9 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
     let vars = getVars p
     let bottom = head (latticeLevels lat)
     
-    -- Initial Dynamic Labels (using naming convention)
-    let initialLabels = levelFromName lat
+    -- All variables start at the lattice bottom; input(ℓ, x) is the only
+    -- way to inject a non-⊥ label.
+    let initialLabels = \_ -> bottom
     
     -- Initial MultiMemory (empty for all levels)
     let initialMultiMemory = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
@@ -70,7 +41,7 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
             execute
         Static -> do
             putStrLn (boldYellow "--- Mode: STATIC TYPING ONLY ---")
-            let staticEnv = initEnv lat vars
+            let staticEnv = initEnv lat
             case cmdType lat fns vars staticEnv bottom p of
                 WellTyped _ _ -> do
                     putStrLn (boldGreen "--- Static Analysis: WELL-TYPED ---")
@@ -81,7 +52,7 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
                     putStrLn (dim "--- Execution Halting due to static type error ---")
         Both -> do
             putStrLn (boldYellow "--- Mode: BOTH STATIC AND DYNAMIC ---")
-            let staticEnv = initEnv lat vars
+            let staticEnv = initEnv lat
             case cmdType lat fns vars staticEnv bottom p of
                 WellTyped _ _ -> do
                     putStrLn (boldGreen "--- Static Analysis: WELL-TYPED ---")

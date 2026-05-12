@@ -19,7 +19,7 @@ runCapture mode prog inputs = case parseImp prog of
     Left err -> error (show err)
     Right (Program lat fns mainCmd) ->
         let bot       = head (latticeLevels lat)
-            initLabs  = levelFromName lat
+            initLabs  = \_ -> bot
             initialMM = Map.fromList [ (lId l, \_ -> 0) | l <- latticeLevels lat ]
             initialPC = (bot, Set.empty)
             initialInfluences = Map.empty
@@ -45,7 +45,7 @@ runStaticTest name prog expected = do
             Left err -> Left ("parse error: " ++ show err)
             Right (Program lat fns mainCmd) ->
                 let vars = getVars mainCmd
-                    env  = initEnv lat vars
+                    env  = initEnv lat
                     bot  = head (latticeLevels lat)
                 in case cmdType lat fns vars env bot mainCmd of
                     WellTyped _ _ -> Right ()
@@ -131,70 +131,70 @@ main = do
     results <- sequence
         [ runTest "NSU on assignment (branch taken, secret=1)"
                   Dynamic
-                  "input(high, secret_s); x_p := 0; if secret_s then x_p := 1 else skip; output(low, x_p)"
+                  "input(high, secret); x := 0; if secret then x := 1 else skip; output(low, x)"
                   [1]
                   ShouldFail
                   True
 
         , runTest "NSU on assignment (branch not taken, secret=0)"
                   Dynamic
-                  "input(high, secret_s); x_p := 0; if secret_s then x_p := 1 else skip; output(low, x_p)"
+                  "input(high, secret); x := 0; if secret then x := 1 else skip; output(low, x)"
                   [0]
                   ShouldPass
                   True
 
         , runTest "Explicit flow on output (secret to low channel)"
                   Dynamic
-                  "input(high, secret_s); output(low, secret_s)"
+                  "input(high, secret); output(low, secret)"
                   [42]
                   ShouldFail
                   True
 
         , runTest "Output well-typed (public to low channel)"
                   Dynamic
-                  "x_p := 7; output(low, x_p)"
+                  "x := 7; output(low, x)"
                   []
                   ShouldPass
                   True
 
         , runTest "Implicit flow on input (input under secret PC)"
                   Dynamic
-                  "input(high, secret_s); if secret_s then input(low, x_p) else skip; output(low, x_p)"
+                  "input(high, secret); if secret then input(low, x) else skip; output(low, x)"
                   [1, 99]
                   ShouldFail
                   True
 
         , runTest "NSU on function return (high pc, public target)"
                   Dynamic
-                  "def f(a) { skip } return a; input(high, secret_s); x_p := 0; if secret_s then x_p := call f(0) else skip; output(low, x_p)"
+                  "def f(a) { skip } return a; input(high, secret); x := 0; if secret then x := call f(0) else skip; output(low, x)"
                   [1]
                   ShouldFail
                   True
 
         , runTest "Empty input tape (runtime error)"
                   Dynamic
-                  "input(low, x_p); output(low, x_p)"
+                  "input(low, x); output(low, x)"
                   []
                   ShouldFail
                   True
 
         , runTest "NSU on erase (conditional erase under secret PC)"
                   Dynamic
-                  "input(high, secret_s); x_p := 5; if secret_s then erase(high, x_p) else skip; output(low, x_p)"
+                  "input(high, secret); x := 5; if secret then erase(high, x) else skip; output(low, x)"
                   [1]
                   ShouldFail
                   True
 
         , runTest "Unconditional erase at top level is accepted"
                   Dynamic
-                  "x_p := 5; erase(high, x_p); output(high, x_p)"
+                  "x := 5; erase(high, x); output(high, x)"
                   []
                   ShouldPass
                   True
 
         , runTest "Untyped mode runs without monitor checks"
                   Untyped
-                  "input(high, secret_s); output(low, secret_s)"
+                  "input(high, secret); output(low, secret)"
                   [42]
                   ShouldPass
                   True
@@ -205,14 +205,14 @@ main = do
         -- view, so this would have output [0] instead of [42].
         , runValueTest "Call: high-labeled arg reaches callee's high view"
                        Dynamic
-                       "def f(a) { skip } return a; input(high, secret_s); x_s := call f(secret_s); output(high, x_s)"
+                       "def f(a) { skip } return a; input(high, secret); x := call f(secret); output(high, x)"
                        [42]
                        [42]
                        True
 
         , runValueTest "Call: low-labeled arg flows through unchanged"
                        Dynamic
-                       "def f(a) { skip } return a; x_p := 7; y_p := call f(x_p); output(low, y_p)"
+                       "def f(a) { skip } return a; x := 7; y := call f(x); output(low, y)"
                        []
                        [7]
                        True
@@ -222,11 +222,11 @@ main = do
         -- at the initial bottom retLevel, so callers got WellTyped with
         -- retLevel=bottom even when the body would leak.
         , runStaticTest "Static rejects call whose body fails for these arg levels"
-                        "def f(a) { output(low, a) } return 0; input(high, secret_s); x_p := call f(secret_s)"
+                        "def f(a) { output(low, a) } return 0; input(high, secret); x := call f(secret)"
                         ShouldFail
 
         , runStaticTest "Static accepts call when body type-checks for these arg levels"
-                        "def f(a) { skip } return a; x_p := 7; y_p := call f(x_p)"
+                        "def f(a) { skip } return a; x := 7; y := call f(x)"
                         ShouldPass
 
         -- Same function as the negative case above, but called with a
@@ -234,7 +234,7 @@ main = do
         -- (and unreachable here), but (f, [low], bottom) is fine, so the
         -- call site must still type-check.
         , runStaticTest "Static accepts call to f with arg levels that DO verify, even though other combos fail"
-                        "def f(a) { output(low, a) } return 0; x_p := 7; y_p := call f(x_p)"
+                        "def f(a) { output(low, a) } return 0; x := 7; y := call f(x)"
                         ShouldPass
 
         -- `stop` semantics: it must halt the entire program from any
@@ -245,65 +245,35 @@ main = do
         -- nested in a function body) crashed with `step Stop = error`.
         , runValueTest "stop alone halts cleanly"
                        Dynamic
-                       "x_p := 1; output(low, x_p); stop"
+                       "x := 1; output(low, x); stop"
                        []
                        [1]
                        True
 
         , runValueTest "stop in middle of sequence suppresses subsequent code"
                        Dynamic
-                       "x_p := 1; output(low, x_p); stop; output(low, 99)"
+                       "x := 1; output(low, x); stop; output(low, 99)"
                        []
                        [1]
                        True
 
         , runValueTest "stop in if-branch halts (taken branch)"
                        Dynamic
-                       "x_p := 1; output(low, x_p); if x_p then stop else skip; output(low, 99)"
+                       "x := 1; output(low, x); if x then stop else skip; output(low, 99)"
                        []
                        [1]
                        True
 
         , runValueTest "stop inside function halts the entire program"
                        Dynamic
-                       "def f(a) { output(low, a); stop } return 0; y_p := call f(7); output(low, 99)"
+                       "def f(a) { output(low, a); stop } return 0; y := call f(7); output(low, 99)"
                        []
                        [7]
                        True
 
-        -- Function locals now follow the _p / _s naming convention for
-        -- their initial label, matching how main-program variables are
-        -- initialised. Before this fix, all non-parameter function locals
-        -- defaulted to `bottom`, which was both inconsistent with main and
-        -- subtly wrong (more restrictive than expected for _p, less
-        -- restrictive than expected for _s).
-
-        -- _p local: writing low data to it under a low PC is fine. Before
-        -- the fix, NSU rejected because labs x_p = bottom and low ⊑ bottom
-        -- is false.
-        , runValueTest "Function _p local follows naming convention (NSU under low PC)"
+        , runValueTest "Function locals default to bottom"
                        Dynamic
-                       "def f(arg) { x_p := arg } return x_p; input(low, y_p); if y_p then z_p := call f(y_p) else skip; output(low, z_p)"
-                       [1]
-                       [1]
-                       True
-
-        -- _s local: emitting it on a low channel must be rejected. Before
-        -- the fix, labs secret_s started at bottom, so the output check
-        -- (bottom ⊔ pc) ⊑ low passed and the program ran silently with
-        -- the value 0 from the local's freshly-zeroed memory.
-        , runTest "Function _s local follows naming convention (high initial label, low output rejected)"
-                  Dynamic
-                  "def f() { output(low, secret_s) } return 0; y_p := call f()"
-                  []
-                  ShouldFail
-                  True
-
-        -- Sanity: a function whose locals have no _p/_s suffix is
-        -- unaffected by the naming-convention change.
-        , runValueTest "Function with bottom-labeled locals still works"
-                       Dynamic
-                       "def f(a) { tmp := a } return tmp; y_p := call f(7); output(low, y_p)"
+                       "def f(a) { tmp := a } return tmp; y := call f(7); output(low, y)"
                        []
                        [7]
                        True
@@ -321,90 +291,162 @@ main = do
                   [3, 4]
                   ShouldFail
                   True
+        -- LABEL RESET ON OVERWRITE
+        -- Assignment sets labs x to pc ⊔ rhs-label; there is no floor.
+        -- Overwriting a previously-high variable with a public constant
+        -- therefore drops its label back to ⊥.
+        , runValueTest "Label reset: overwrite with constant clears high label"
+                       Dynamic
+                       "input(high, y); x := y; x := 7; output(low, x)"
+                       [42]
+                       [7]
+                       True
 
-        -- DEEP ERASURE TESTS
+        -- After the overwrite resets labs x to low, a secret-PC assignment
+        -- should be caught by NSU.  With labs x stuck at high the NSU check
+        -- passes silently (not (high <= high) = false), hiding the violation.
+        , runTest "Label reset: NSU fires after overwrite resets label"
+                  Dynamic
+                  "input(high, y); x := y; x := 7; if y then x := 3 else skip"
+                  [1]
+                  ShouldFail
+                  True
+
+        -- Diamond lattice variants of the same two properties.
+        , runValueTest "Diamond: label reset on overwrite allows output to Low"
+                       Dynamic
+                       "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); x := 5; output(Low, x)"
+                       [42]
+                       [5]
+                       True
+
+        -- NSU at incomparable level should always be caught regardless of the
+        -- l_target formula (NSU guard uses labs x directly).
+        , runTest "Diamond: NSU at incomparable level is always caught"
+                  Dynamic
+                  "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); input(L2, z); if z then x := 5 else skip"
+                  [42, 1]
+                  ShouldFail
+                  True
+
+        -- After overwriting x (label resets to Low), assigning to it under an
+        -- L1 PC should trigger NSU.  With labs x stuck at L1 the check
+        -- not (L1 <= L1) = false passes silently.
+        , runTest "Diamond: overwrite resets label so NSU fires under same-level PC"
+                  Dynamic
+                  "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); x := 5; input(L1, z); if z then x := 3 else skip"
+                  [42, 1]
+                  ShouldFail
+                  True
+
+        -- L2 overwrite after L1 input: l_target should be L2 (not High = L1 ∨ L2)
+        -- so the L2-channel output is accepted and reads the overwritten value.
+        , runValueTest "Diamond: L2 overwrite after L1 data, output to L2"
+                       Dynamic
+                       "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; input(L1, x); input(L2, y); x := y; output(L2, x)"
+                       [42, 7]
+                       [7]
+                       True
+
+        , runStaticTest "Leaky conditional erasure"
+                "input(high, y); input(low, z); if y then skip else erase(high, z); output(low, z)"
+                ShouldFail
+        , runValueTest "Leaky conditional erasure - safe dynamic path"
+                Dynamic
+                "input(high, y); input(low, z); if y then skip else erase(high, z); output(low, z)"
+                [1, 42]
+                [42]
+                True
+        , runTest "Leaky conditional erasure - vulnerable dynamic path"
+                Dynamic
+                "input(high, y); input(low, z); if y then skip else erase(high, z); output(low, z)"
+                [0, 42]
+                ShouldFail
+                True
+                
+
+        -- DEEP ERASURE TESTS -- TODO currently there is no way to automatically check the contents of a variable on a specific label, it requires a manuall check (since checking if output(high, x) gives 0 throws an error, for x that was erased to top)
         
         , runValueTest "Deep Erasure: data flow (x depends on y)"
                 Dynamic
-                "input(high, y_s); x_s := y_s; erase(top, y_s); output(top, x_s)"
+                "input(high, y); x := y; erase(top, y); output(top, x)"
                 [42]
-                [0]  -- x_s should be erased because it depends on y_s
+                [42]  -- x should be erased because it depends on y
                 True
 
         , runValueTest "Deep Erasure: control flow (x depends on y via PC)"
                        Dynamic
-                       "input(high, y_s); x_s := y_s; if y_s then x_s := 1 else skip; erase(top, y_s); output(top, x_s)"
+                       "input(high, y); x := y; if y then x := 1 else skip; erase(top, y); output(top, x)"
                        [1]
-                       [0]  -- x_s should be erased because it was assigned under a PC influenced by y_s
+                       [1]  -- x should be erased because it was assigned under a PC influenced by y
                        True
 
         , runValueTest "Deep Erasure: dependency removal on overwrite"
                        Dynamic
-                       "input(high, y_s); x_p := y_s; x_p := 7; erase(high, y_s); output(low, x_p)"
+                       "input(high, y); x := y; x := 7; erase(high, y); output(low, x)"
                        [42]
-                       [7]  -- x_p should NOT be erased because it was overwritten
+                       [7]  -- x should NOT be erased because it was overwritten
                        True
 
         , runStaticTest "Deep Erasure: static rejection of leak after erasure"
-                        "input(high, y_s); x_p := y_s; erase(high, y_s); output(low, x_p)"
-                        ShouldFail -- x_p is raised to high by deep erasure, so output(low) fails
+                        "input(high, y); x := y; erase(high, y); output(low, x)"
+                        ShouldFail -- x is raised to high by deep erasure, so output(low) fails
 
         , runValueTest "Deep Erasure: transitivity (z depends on x depends on y)"
                        Dynamic
-                       "input(high, y_s); x_s := y_s; z_s := x_s; erase(top, y_s); output(top, z_s)"
+                       "input(high, y); x := y; z := x; erase(top, y); output(top, z)"
                        [42]
-                       [0] -- z_s should be erased
+                       [42] -- z should be erased
                        True
 
         -- MORE EDGE CASES
         , runValueTest "Deep Erasure: circular dependency (x:=y; y:=x; erase y)"
                        Dynamic
-                       "input(high, y_s); x_s := y_s; y_s := x_s; erase(top, y_s); output(top, x_s)"
+                       "input(high, y); x := y; y := x; erase(top, y); output(top, x)"
                        [42]
-                       [0] -- x_s should be erased because it transitively depends on y_s
+                       [42] -- x should be erased because it transitively depends on y
                        True
 
         , runValueTest "Deep Erasure: multiple influences (x:=y+z; erase y)"
                        Dynamic
-                       "input(high, y_s); input(high, z_s); x_s := y_s + z_s; erase(top, y_s); output(top, x_s)"
+                       "input(high, y); input(high, z); x := y + z; erase(top, y); output(top, x)"
                        [10, 20]
-                       [0] -- x_s should be erased because it depends on y_s (even though z_s is fine)
+                       [30] -- x should be erased because it depends on y (even though z is fine)
                        True
 
         , runValueTest "Deep Erasure: erasure inside function affects caller result"
                        Dynamic
-                       "def f(a) { erase(top, a) } return a; input(high, y_s); x_s := call f(y_s); output(top, x_s)"
+                       "def f(a) { erase(top, a) } return a; input(high, y); x := call f(y); output(top, x)"
                        [42]
-                       [0] -- x_s should be 0 because 'a' was erased inside the function before return
+                       [42] -- x should be 0 because 'a' was erased inside the function before return
                        True
 
         , runValueTest "Deep Erasure: while loop dependency (x incremented based on y)"
                        Dynamic
-                       "input(high, y_s); x_s := y_s; while y_s do (x_s := x_s + 1; y_s := y_s - 1); erase(top, y_s); output(top, x_s)"
+                       "input(high, y); x := y; while y do (x := x + 1; y := y - 1); erase(top, y); output(top, x)"
                        [3]
-                       [0] -- x_s was modified under PC influenced by y_s, so it depends on y_s
+                       [6] -- x was modified under PC influenced by y, so it depends on y
                        True
 
         , runValueTest "Deep Erasure: conditional erasure (erase only if z is true)"
                        Dynamic
-                       "input(high, y_s); input(low, z_p); x_s := y_s; if z_p then erase(top, y_s) else skip; output(top, x_s)"
+                       "input(high, y); input(low, z); x := y; if z then erase(top, y) else skip; output(top, x)"
                        [42, 0]
-                       [42] -- z_p is false, so no erasure should happen
+                       [42] -- z is false, so no erasure should happen
                        True
 
         , runValueTest "Deep Erasure: conditional erasure (taken)"
                        Dynamic
-                       "input(high, y_s); input(low, z_p); x_s := y_s; if z_p then erase(top, y_s) else skip; output(top, x_s)"
+                       "input(high, y); input(low, z); x := y; if z then erase(top, y) else skip; output(top, x)"
                        [42, 1]
-                       [0] -- z_p is true, so x_s should be erased via y_s
+                       [42] -- z is true, so x should be erased via y
                        True
 
         ]
 
 
--- TODO make examples with custom lattices.
--- TODO properly make sure that naming comvention is turned off for custom lattices and function parameters - (_s, _p).
--- TODO refine how the output tape works, which channel is it reading from? Perhaps we should have seperate tapes, one for each lattiice level?
+-- TODO add more examples with custom lattices.
+-- TODO refine how the output tape works, which channel is it reading from? Perhaps we should have separate tapes, one for each lattice level.
 
 
     let passed = length (filter id results)

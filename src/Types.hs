@@ -226,8 +226,5 @@ cmdType lat fns vars env pc cmd =
 
 -- EXAMPLES
 
--- levelFromName lives in Imp.hs (so the dynamic monitor can use it); it is
--- in scope here via `import Imp`.
-initEnv :: SecurityLattice -> [VarName] -> Environment
-initEnv lat vars =
-  foldl (\env var -> updateEnv env var (levelFromName lat var)) (\_ -> head (latticeLevels lat)) vars
+initEnv :: SecurityLattice -> Environment
+initEnv lat = \_ -> head (latticeLevels lat)

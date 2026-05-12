@@ -10,6 +10,10 @@ import Test.QuickCheck.Monadic
 instance Arbitrary BinOp
   where arbitrary = elements [ Plus, Minus, Times]
 
+-- TODO: the _p/_s naming convention has been removed. These identifiers no
+-- longer carry any label by virtue of their name. To exercise this generator,
+-- have the QuickCheck driver prepend input(...) commands that establish
+-- whichever labels the property under test requires.
 allowedIds = ["x1_p", "x2_p", "x3_p", "y1_s", "y2_s", "y3_s"]
 
 allowedIdsGen = elements allowedIds
