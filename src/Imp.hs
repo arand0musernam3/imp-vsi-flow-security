@@ -311,7 +311,7 @@ step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s, infl) =
                  ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
                  ++ show l_var ++ "); a conditional erase under a higher PC would "
                  ++ "be observable at lower levels."
-       else let pc_vars = getPCVars pcs
+       else let pc_vars = getPCVars pcs -- TODO there is a bug in here that doesn't delete inactive influences from the deps list - see test Deep Erasure: bug testing
                 deps = getDependents x infl
                 (new_mm, new_labs) = Set.foldl (\(m, l) v ->
                     let l_target_v = l_cmd \/ l v \/ pc

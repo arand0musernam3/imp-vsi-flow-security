@@ -441,7 +441,33 @@ main = do
                        [42, 1]
                        [42] -- z is true, so x should be erased via y
                        True
-
+        , runValueTest "Deep Erasure: prevent erasure after influencing varuable overwrite"
+                       Dynamic
+                       "input(high, c); x:= 5; v := x; input(high, x); if c then erase(top, x) else skip; output(low, v)"
+                       [1, 10]
+                       [5]
+                       True
+        , runValueTest "Calee infl map: bug testing"
+                       Dynamic
+                       "def f(a) { t := a; t := t + 1 } return t; input(low, x); y := call f(x); erase(top, x)"
+                       [10]
+                       []
+                       True
+        , runValueTest "Calee infl map: bug testing"
+                        Dynamic
+                        "def f(a) { t := a; t := t + 1 } return t; input(low, t); y := call f(t); erase(top, t)" 
+                        [10]
+                        []
+                        True
+        , runStaticTest "While test"
+                        "input(high,c); x := 5; while c do x := x + 1"
+                        ShouldPass
+        , runValueTest "Functions can't make assignments under a high PC - bug"
+                        Dynamic
+                        "def f(x) { t := x } return t; input(high, s); if s then a := 5 else skip"
+                        [1]
+                        []
+                        True
         ]
 
 
