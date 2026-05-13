@@ -96,7 +96,18 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
     Assign x e ->
         let l = exprType env e
             l' = pc \/ l \/ env x
-            new_infl = Map.insert x (Set.union (varsExpr e) pc_vars) infl
+            -- Mirror the dynamic Assign: only clean x from other entries
+            -- when the new x is independent of the old x. If the closure of
+            -- the rhs's vars contains x (e.g. `x := x + 1`), the new x is
+            -- in the same stream as the old x, so dependencies that other
+            -- variables hold on x must be preserved.
+            pre_closure = Imp.inflClosure (varsExpr e) infl
+            new_depends_on_old = Set.member x pre_closure
+            cleaned = if new_depends_on_old
+                      then infl
+                      else Map.map (Set.delete x) infl
+            deps_closure = Imp.inflClosure (varsExpr e) cleaned
+            new_infl = Map.insert x (Set.union deps_closure pc_vars) cleaned
         in WellTyped (updateEnv env x l') new_infl
     Seq c1 c2 ->
         case cmdType' fns summaries vars env (pc, pc_vars) infl c1 of
@@ -112,19 +123,37 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
                 err -> err
             err -> err
     While e c ->
+        -- Fixed-point iteration over (env, infl): re-type the body under the
+        -- joined post-state until nothing changes. The lattice has finite
+        -- height and assignment is monotone in both env and infl (labels
+        -- only join up, dependency sets only union in), so termination is
+        -- bounded by O(height(lattice) × |vars|) iterations.
         let l = exprType env e
             pc' = pc \/ l
             pc_vars' = Set.union pc_vars (varsExpr e)
-        in case cmdType' fns summaries vars env (pc', pc_vars') infl c of
-            WellTyped env' infl' -> 
-                if envFlowsTo vars env' env
-                   then WellTyped env (Map.unionWith Set.union infl infl')
-                   else TypeError "While loop body changes environment unpredictably"
-            err -> err
+
+            loop env_in infl_in =
+                case cmdType' fns summaries vars env_in (pc', pc_vars') infl_in c of
+                    WellTyped env_out infl_out ->
+                        let env_next  = joinEnv env_in env_out
+                            infl_next = Map.unionWith Set.union infl_in infl_out
+                            -- env_next ≥ env_in by construction; stability is
+                            -- the reverse direction (env_next ≤ env_in).
+                            env_stable  = envFlowsTo vars env_next env_in
+                            infl_stable = infl_next == infl_in
+                        in if env_stable && infl_stable
+                           then WellTyped env_in infl_in
+                           else loop env_next infl_next
+                    err -> err
+        in loop env infl
     Input ch x ->
         if not (pc <= ch)
         then TypeError $ "Input failed: pc (" ++ show pc ++ ") does not flow to channel (" ++ show ch ++ ")"
-        else let new_infl = Map.insert x pc_vars infl
+        else let new_depends_on_old = Set.member x pc_vars
+                 cleaned = if new_depends_on_old
+                           then infl
+                           else Map.map (Set.delete x) infl
+                 new_infl = Map.insert x pc_vars cleaned
              in WellTyped (updateEnv env x (ch \/ pc \/ env x)) new_infl
     Output ch e ->
         let l = exprType env e
@@ -138,7 +167,12 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
                     l_target_v = l_cmd \/ l_v \/ pc
                 in updateEnv acc_env v l_target_v
                 ) env deps
-            new_infl = Set.foldl (\acc v -> Map.insert v pc_vars acc) infl deps
+            -- Same fix as the dynamic Erase: union pc_vars into each erased
+            -- variable's existing deps so the dependency chain survives the
+            -- erase and a subsequent erase can still re-find the same set.
+            new_infl = Set.foldl
+                (\acc v -> Map.insertWith Set.union v pc_vars acc)
+                infl deps
         in WellTyped new_env new_infl
     Call x fName args ->
         case filter (\f -> funcName f == fName) fns of
@@ -147,7 +181,20 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
                 let argLevels = map (exprType env) args
                 in case Map.lookup (fName, argLevels, pc) summaries of
                     Just retLevel ->
-                        let new_infl = Map.insert x (Set.union (Set.unions (map varsExpr args)) pc_vars) infl
+                        -- Static can't peek into the callee's per-iteration
+                        -- influence map (the summary only carries retLevel),
+                        -- so we approximate Approach B by taking the eager
+                        -- transitive closure of the argument variables within
+                        -- the caller's own infl. This captures everything the
+                        -- caller can know about which variables flowed in.
+                        let arg_vars = Set.unions (map varsExpr args)
+                            arg_closure = Imp.inflClosure arg_vars infl
+                            new_x_deps = Set.union arg_closure pc_vars
+                            new_depends_on_old = Set.member x new_x_deps
+                            cleaned = if new_depends_on_old
+                                      then infl
+                                      else Map.map (Set.delete x) infl
+                            new_infl = Map.insert x new_x_deps cleaned
                         in WellTyped (updateEnv env x (pc \/ retLevel)) new_infl
                     Nothing -> TypeError $ "Function " ++ fName
                               ++ " is not well-typed for argument levels "

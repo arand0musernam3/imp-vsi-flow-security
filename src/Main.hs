@@ -459,15 +459,216 @@ main = do
                         [10]
                         []
                         True
+        , runValueTest "Infl map: bug testing"
+                        Dynamic
+                        "x := 1; a := x; x := x+1; erase(high, x); erase(top, x)" 
+                        [10]
+                        []
+                        True
         , runStaticTest "While test"
                         "input(high,c); x := 5; while c do x := x + 1"
                         ShouldPass
-        , runValueTest "Functions can't make assignments under a high PC - bug"
-                        Dynamic
-                        "def f(x) { t := x } return t; input(high, s); if s then a := 5 else skip"
-                        [1]
-                        []
-                        True
+
+        ---------------------------------------------------------------------
+        -- INFLUENCE-MAP CLEANUP: tests for the conditional cleanup rule.
+        -- The rule: at `Assign x e`, drop x from every other variable's
+        -- dependency set ONLY when the new x is independent of the old x
+        -- (i.e. x ∉ inflClosure(varsExpr e, infl)). For a reflexive update
+        -- like `x := x + 1`, x ∈ closure, so dependencies must be kept.
+        ---------------------------------------------------------------------
+
+        -- Reflexive update keeps the x->a link. Reading at top sees the old
+        -- value (1) since eraseMultiMemory preserves the target-level view.
+        , runValueTest "Infl cleanup: reflexive x := x+1 keeps a's dep on x"
+                       Dynamic
+                       "x := 1; a := x; x := x + 1; erase(top, x); output(top, a)"
+                       []
+                       [1]
+                       True
+
+        -- Same setup; since erase raised labs a to top, reading at low must
+        -- fail the dynamic monitor (label/channel mismatch).
+        , runTest "Infl cleanup: reflexive update + erase raises a to top (low output blocked)"
+                  Dynamic
+                  "x := 1; a := x; x := x + 1; erase(top, x); output(low, a)"
+                  []
+                  ShouldFail
+                  True
+
+        -- Non-reflexive overwrite (`x := 5`) breaks the x->a link, so a is
+        -- preserved and stays at its original (bottom) label.
+        , runValueTest "Infl cleanup: non-reflexive `x := 5` breaks the x->a influence"
+                       Dynamic
+                       "x := 1; a := x; x := 5; erase(top, x); output(low, a)"
+                       []
+                       [1]
+                       True
+
+        -- a's label is high (set when secret was high), so output(low, a)
+        -- fails. This shows that label-reset only happens for the *overwritten*
+        -- variable, not for variables that previously read from it.
+        , runTest "Infl cleanup: non-reflexive overwrite keeps a at high"
+                       Dynamic
+                       "input(high, secret); a := secret; secret := 0; output(low, a)"
+                       [42]
+                       ShouldFail
+                       True
+
+        ---------------------------------------------------------------------
+        -- EAGER CLOSURE: tests that dependency chains survive across
+        -- intermediate variables, so a single erase finds all transitive
+        -- descendants in one shot.
+        ---------------------------------------------------------------------
+
+        , runValueTest "Eager closure: erase propagates through a 4-step chain"
+                       Dynamic
+                       "input(high, x); y := x; z := y; w := z; erase(high, x); output(top, w)"
+                       [42]
+                       [42]
+                       True
+
+        , runTest "Eager closure: every intermediate var rises to top"
+                  Dynamic
+                  "input(high, x); y := x; z := y; w := z; erase(top, x); output(low, w)"
+                  [42]
+                  ShouldFail
+                  True
+
+        ---------------------------------------------------------------------
+        -- ERASE PRESERVES DEPENDENCIES two consecutive erases must both pick up the same dependent.
+        ---------------------------------------------------------------------
+
+        , runValueTest "Erase chain: second erase still finds a via x"
+                       Dynamic
+                       "x := 1; a := x; x := x + 1; erase(high, x); erase(top, x); output(top, a)"
+                       []
+                       [1]
+                       True
+
+        , runTest "Erase chain: a's final label is top after both erases"
+                  Dynamic
+                  "x := 1; a := x; x := x + 1; erase(high, x); erase(top, x); output(high, a)"
+                  []
+                  ShouldFail
+                  True
+
+        ---------------------------------------------------------------------
+        -- CALLEE->CALLER MAPPING: the return value's deps are
+        -- traced through the callee's influence map and resolved back to
+        -- the caller-side variables that fed each parameter.
+        ---------------------------------------------------------------------
+
+        -- Function does intermediate work; the eager closure inside the
+        -- callee keeps t's chain back to a, and Return substitutes
+        -- a -> caller's x. erase(top, x) must then also erase y.
+        , runValueTest "Callee chain a->t carries to caller y"
+                       Dynamic
+                       "def f(a) { t := a; t := t + 1 } return t; input(low, x); y := call f(x); erase(top, x); output(top, y)"
+                       [10]
+                       [11]
+                       True
+
+        , runTest "y's label rises to top with x"
+                  Dynamic
+                  "def f(a) { t := a; t := t + 1 } return t; input(low, x); y := call f(x); erase(top, x); output(low, y)"
+                  [10]
+                  ShouldFail
+                  True
+
+        -- If the function ignores its argument and returns a constant, the
+        -- return-value-deps closure is empty, resolved is empty, and y
+        -- depends on nothing. erase(top, x) must NOT touch y.
+        , runValueTest "y independent of x when f returns constant"
+                       Dynamic
+                       "def f(a) { skip } return 42; input(low, x); y := call f(x); erase(top, x); output(low, y)"
+                       [10]
+                       [42]
+                       True
+
+        -- Self-call x := call f(x): the new x reaches resolved through
+        -- the args, so caller's old x-deps must be preserved.
+        , runValueTest "self-call x := call f(x) keeps x's stream"
+                       Dynamic
+                       "def f(a) { skip } return a; input(low, x); a := x; x := call f(x); erase(top, x); output(top, a)"
+                       [7]
+                       [7]
+                       True
+        , runTest "a rises with x in self-call scenario"
+                  Dynamic
+                  "def f(a) { skip } return a; input(low, x); a := x; x := call f(x); erase(top, x); output(low, a)"
+                  [7]
+                  ShouldFail
+                  True
+
+        ---------------------------------------------------------------------
+        -- FUNCTION LOCALS AT CALLER'S PC: a callee body that assigns to a
+        -- local can now run under a high caller PC, because non-arg locals
+        -- are initialized to `pc` rather than ⊥ (PLAS '09 [U-REF] analog).
+        ---------------------------------------------------------------------
+
+        -- The call is under high pc and the result is assigned to a target
+        -- whose label is already high, so the return-side NSU also passes.
+        , runValueTest "Function locals at pc: body assigns under high caller pc"
+                       Dynamic
+                       "def f(a) { t := a; t := t + 1 } return t; input(high, s); y := s; if s then y := call f(s) else skip; output(high, y)"
+                       [1]
+                       [2]
+                       True
+        , runValueTest "Function locals at pc: body assigns under high caller pc"
+                       Dynamic
+                       "def f(b) { t := b; t := t + 1 } return t; input(high, s); input(high, a); erase(high, y); if s then y := call f(a) else skip; output(high, y)"
+                       [1, 1]
+                       [2]
+                       True
+
+        ---------------------------------------------------------------------
+        -- STATIC WHILE: fixed-point iteration accepts loops that raise
+        -- variables' labels in the body. The pre-fix single-pass check
+        -- rejected anything where env_out > env_in.
+        ---------------------------------------------------------------------
+
+        , runStaticTest "Static While: high-PC body that raises x is accepted"
+                        "input(high, c); x := 5; while c do x := x + 1; output(high, x)"
+                        ShouldPass
+
+        , runStaticTest "Static While: leak through loop body is still rejected"
+                        "input(high, c); x := 5; while c do x := x + 1; output(low, x)"
+                        ShouldFail
+
+        , runStaticTest "Static While: multi-var loop reaches fixed point"
+                        "input(high, c); x := 0; y := 0; while c do (x := x + 1; y := y + x); output(high, y); output(high, x)"
+                        ShouldPass
+
+        , runStaticTest "Static While: trivial loop (no env change) accepted"
+                        "input(low, c); x := 5; while c do skip; output(low, x)"
+                        ShouldPass
+
+        ---------------------------------------------------------------------
+        -- INFLUENCE-MAP CLEANUP IN CONDITIONAL CONTEXT.
+        -- pc_vars must be carried into the new dep set, even when cleaning.
+        ---------------------------------------------------------------------
+
+        -- Under if c then x := ..., the new x's deps must include c (via
+        -- pc_vars). erase(top, c) should then also erase x.
+        , runValueTest "Implicit flow: erase(c) deep-erases x assigned under PC c"
+                       Dynamic
+                       "input(high, c); input(high, x); if c then x := x+1 else skip; erase(top, c); output(top, x)"
+                       [1, 1]
+                       [2]
+                       True
+
+        , runTest "Implicit flow: x's label rises with c after deep erase"
+                  Dynamic
+                  "input(high, c); input(high, x); if c then x := x+1 else skip; erase(top, c); output(high, x)"
+                  [1, 1]
+                  ShouldFail
+                  True
+        , runTest "Implicit flow leak"
+                  Dynamic
+                  "input(high, x); y:=1; z:=1; if x then input(high, y) else skip; if y then z:=0 else skip; output(low, z)"
+                  [1, 0]
+                  ShouldFail
+                  True
         ]
 
 

@@ -137,8 +137,42 @@ update m x v = \y -> if y == x then v else m y
 -- Configuration includes current command, multi-memory, labels, PC stack, input, output, call stack, and influences
 type PCContext = (Level, Set.Set VarName)
 type Influences = Map.Map VarName (Set.Set VarName)
-type Stack = [(VarName, MultiMemory, Labels, [PCContext], Expr, Influences)]
+
+-- A stack frame holds the saved caller state plus, for the precise Approach B
+-- of callee-to-caller dependency mapping:
+--   * `calleeIntroNames` — every name introduced inside the callee (its params
+--     plus all variables that appear in its body). Used at Return to drop
+--     callee-only names from the dependency set.
+--   * `argToVars` — for each parameter p, the set of caller-side variables
+--     that appeared in the corresponding argument expression (joined with the
+--     caller's pc_vars at the call site). Used at Return to substitute back
+--     into the caller's namespace.
+type StackFrame =
+    ( VarName, MultiMemory, Labels, [PCContext], Expr, Influences
+    , Set.Set VarName                    -- callee_intro_names
+    , Map.Map VarName (Set.Set VarName)  -- arg_to_vars: param -> caller-side vars
+    )
+type Stack = [StackFrame]
 type Configuration = (Cmd, MultiMemory, Labels, [PCContext], [Value], [(Level, Value)], Stack, Influences)
+
+-- Forward transitive closure of `seed` through the influence map: starting
+-- from a set of variables, repeatedly union in their direct dependencies until
+-- nothing new appears. Used by Assign to keep `infl[x]` "eager" — every
+-- transitive dependency is recorded directly, so dependency chains survive
+-- subsequent reassignments that would otherwise drop intermediate vars.
+-- (Named `inflClosure` to avoid clashing with `Types.transitiveClosure`,
+-- which computes the reflexive-transitive closure of the lattice flow matrix.)
+inflClosure :: Set.Set VarName -> Influences -> Set.Set VarName
+inflClosure seed infl = go seed seed
+  where
+    go acc frontier
+      | Set.null frontier = acc
+      | otherwise =
+          let next = Set.unions
+                       [ Map.findWithDefault Set.empty v infl
+                       | v <- Set.toList frontier ]
+              new_frontier = Set.difference next acc
+          in go (Set.union acc new_frontier) new_frontier
 
 data ExecMode = Untyped | Static | Dynamic | Both deriving (Eq, Show)
 
@@ -157,7 +191,7 @@ updateMultiMemory lat mm x v targetLevel =
                 else acc)
           mm (latticeLevels lat)
 
--- Helper to erase variable from multi-memory for all levels <= targetLevel - TODO CHECK IF IT SHOULD BE <= OR NOT <=
+-- Helper to erase variable from multi-memory for all levels <= targetLevel 
 eraseMultiMemory :: SecurityLattice -> MultiMemory -> VarName -> Level -> MultiMemory
 eraseMultiMemory lat mm x targetLevel =
     foldl (\acc l ->
@@ -229,7 +263,30 @@ step mode lat _ (Assign x e, mm, labs, pcs, i, o, s, infl) =
                  ++ " does not flow to " ++ show cur_lab ++ "."
        else let new_mm = updateMultiMemory lat mm x v l_target
                 new_labs y = if y == x then l_target else labs y
-                new_infl = Map.insert x (Set.union (varsExpr e) pc_vars) infl
+                -- Decide whether the new x is independent of the old x. The
+                -- new x carries information from the old x exactly when some
+                -- variable on which it depends (transitively) is x itself —
+                -- e.g. `x := x + 1`, or `x := y` after `y := x`. In that
+                -- case the new x is in the same information stream as the
+                -- old x, so anything in another variable's deps that was
+                -- copied from old x is still relevant and must be kept.
+                -- If instead the new x is truly fresh (`x := 5`, `x := y`
+                -- where y doesn't transitively depend on x), variables that
+                -- hold *historical* x-data are no longer connected to the
+                -- variable named x; drop x from their dependency sets so a
+                -- later `erase x` doesn't sweep them up.
+                pre_closure = inflClosure (varsExpr e) infl
+                new_depends_on_old = Set.member x pre_closure
+                cleaned = if new_depends_on_old
+                          then infl
+                          else Map.map (Set.delete x) infl
+                -- Eager transitive closure of e's variables: keeps dependency
+                -- chains intact across reassignments (so e.g. inside a
+                -- function body `t := a; t := t + 1` preserves t's
+                -- dependency on a — and through a, on the caller's args —
+                -- instead of collapsing infl[t] to {t}).
+                deps_closure = inflClosure (varsExpr e) cleaned
+                new_infl = Map.insert x (Set.union deps_closure pc_vars) cleaned
             in (Stop, new_mm, new_labs, pcs, i, o, s, new_infl)
 
 step mode lat fns (Seq c1 c2, mm, labs, pcs, i, o, s, infl) =
@@ -258,6 +315,17 @@ step _ lat _ (If e c1 c2, mm, labs, pcs, i, o, s, infl) =
 step _ _ _ (ResetPC, mm, labs, (_:pcs), i, o, s, infl) = (Stop, mm, labs, pcs, i, o, s, infl)
 step _ _ _ (ResetPC, _, _, [], _, _, _, _) = error "PC stack underflow"
 
+-- TODO (PC stack growth): desugaring While into If with a recursive While in
+-- the then-branch means each iteration's If pushes a new PC context BEFORE the
+-- previous iteration's ResetPC can fire — the outer ResetPC sits past the
+-- recursive While in `Seq (Seq c (While e c)) ResetPC`. The stack therefore
+-- grows by one frame per iteration during execution and only unwinds when the
+-- loop finally terminates, costing O(iterations) memory in the configuration
+-- (PC stack and the residual Cmd term). Correctness is unaffected — every push
+-- is matched by a ResetPC at termination, and getPCLevel always returns the
+-- correct (pc ⊔ l_e) since every pushed entry has the same label — but a long
+-- loop will hold a linear-sized stack. A direct While rule that reuses one PC
+-- frame per iteration would fix this; not worth the refactor today.
 step mode lat _ (While e c, mm, labs, pcs, i, o, s, infl) =
     (If e (Seq c (While e c)) Skip, mm, labs, pcs, i, o, s, infl)
 
@@ -270,6 +338,18 @@ step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
        then error $ "Dynamic Monitor Exception: side-channel violation at input from channel "
                  ++ show ch ++ ". PC (" ++ show pc ++ ") does not flow to channel "
                  ++ show ch ++ "."
+       -- NSU on the *current* label of x, not on the channel. `input` is a
+       -- conditional update from the monitor's point of view: in one execution
+       -- the branch is taken and labs x rises from labs_old → ch ⊔ pc; in the
+       -- alternative execution it stays labs_old. If labs_old ≠ ch ⊔ pc, the
+       -- label change is observable and leaks pc.
+       --
+       -- Concretely: `input(high, x); if x then input(high, y) else skip;
+       --              if y then z := 0 else skip; output(low, z)`
+       -- with x=0,y=0 leaves labs y = ⊥, so `if y` runs at pc=⊥ and the write
+       -- to z is allowed — z observable at low encodes x.
+       -- The (pc ⊑ ch) side-channel check above does NOT catch this case
+       -- because pc=high ⊑ ch=high holds; only the NSU-on-labs-x check fires.
        else if monitorOn && not (pc <= labs x)
        then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at input to "
                  ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
@@ -280,7 +360,18 @@ step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
             (v:vs) ->
                 let new_mm = updateMultiMemory lat mm x v l_target
                     new_labs y = if y == x then l_target else labs y
-                    new_infl = Map.insert x pc_vars infl -- Input depends on PC vars (which channel we read from might be conditional)
+                    -- Input's new value comes from the external tape, so it
+                    -- is independent of the old x in every case EXCEPT when
+                    -- the input itself is conditional on x — i.e. we're
+                    -- inside `if x then input(...) else …`. In that case x
+                    -- is in pc_vars and the new x's existence carries info
+                    -- about old x via implicit flow, so keep x in other
+                    -- variables' dependency sets. Otherwise clean.
+                    new_depends_on_old = Set.member x pc_vars
+                    cleaned = if new_depends_on_old
+                              then infl
+                              else Map.map (Set.delete x) infl
+                    new_infl = Map.insert x pc_vars cleaned
                 in (Stop, new_mm, new_labs, pcs, vs, o, s, new_infl)
 
 step mode lat _ (Output ch e, mm, labs, pcs, i, o, s, infl) =
@@ -311,13 +402,22 @@ step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s, infl) =
                  ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
                  ++ show l_var ++ "); a conditional erase under a higher PC would "
                  ++ "be observable at lower levels."
-       else let pc_vars = getPCVars pcs -- TODO there is a bug in here that doesn't delete inactive influences from the deps list - see test Deep Erasure: bug testing
+       else let pc_vars = getPCVars pcs
                 deps = getDependents x infl
                 (new_mm, new_labs) = Set.foldl (\(m, l) v ->
                     let l_target_v = l_cmd \/ l v \/ pc
                     in (eraseMultiMemory lat m v l_target_v, \z -> if z == v then l_target_v else l z)
                     ) (mm, labs) deps
-                new_infl = Set.foldl (\acc v -> Map.insert v pc_vars acc) infl deps
+                -- Union pc_vars into each erased variable's existing
+                -- dependency set, rather than replacing it. The erased
+                -- variables are still in the same information stream as x —
+                -- e.g. after `a := x; x := x+1; erase(_, x)`, both x and a
+                -- get erased, but `a` is still derived from x and a later
+                -- `erase(_, x)` must again pick `a` up as a dependent. The
+                -- old `Map.insert v pc_vars` clobbered that link.
+                new_infl = Set.foldl
+                    (\acc v -> Map.insertWith Set.union v pc_vars acc)
+                    infl deps
             in (Stop, new_mm, new_labs, pcs, i, o, s, new_infl)
 step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s, infl) =
     case filter (\f -> funcName f == fName) fns of
@@ -338,17 +438,33 @@ step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s, infl) =
                                empty_mm
                                (zip3 (funcArgs f) vals arg_targets) -- Update the memory with the function arguments value (vals)
 
+                -- Callee non-arg locals start at the caller's pc rather than
+                -- bottom. This mirrors PLAS '09 [U-REF]: a freshly allocated
+                -- cell takes the current pc as its label, so the first
+                -- assignment in the body satisfies the NSU check `pc ⊑ label`.
+                -- Without this, any function body containing an assignment is
+                -- un-callable under a non-bottom pc.
                 new_labs y = case elemIndex y (funcArgs f) of
                                 Just idx -> arg_targets !! idx
-                                Nothing  -> bottom
+                                Nothing  -> pc
 
-                -- Callee influences: parameters depend on the variables in the arguments and caller PC
-                new_infl = Map.fromList [ (p, Set.union (varsExpr e) pc_vars)
-                                        | (p, e) <- zip (funcArgs f) args ]
+                -- Callee_infl starts empty. The caller-side
+                -- variables that contributed to each parameter are recorded
+                -- separately in arg_to_vars and substituted back at Return.
+                -- This avoids the name-shadowing pitfall of injecting caller
+                -- variable names directly into the callee's infl map.
+                new_infl = Map.empty
 
-            in (Seq (funcBody f) Return, new_mm, new_labs, [(pc, pc_vars)], i, o, (x, mm, labs, pcs, funcReturn f, infl) : s, new_infl)
+                callee_intro = Set.fromList (funcArgs f) `Set.union` varsCmd (funcBody f)
+                arg_to_vars  = Map.fromList
+                    [ (p, Set.union (varsExpr e) pc_vars)
+                    | (p, e) <- zip (funcArgs f) args ]
 
-step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr, caller_infl) : s, infl) =
+                frame = (x, mm, labs, pcs, funcReturn f, infl, callee_intro, arg_to_vars)
+
+            in (Seq (funcBody f) Return, new_mm, new_labs, [(pc, pc_vars)], i, o, frame : s, new_infl)
+
+step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr, caller_infl, callee_intro, arg_to_vars) : s, infl) =
     let pc = getPCLevel pcs
         pc_vars = getPCVars pcs
         caller_pc = getPCLevel caller_pcs
@@ -364,14 +480,45 @@ step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller
                  ++ ") is not <= Current Label (" ++ show (caller_labs x) ++ ")."
        else let final_mm = updateMultiMemory lat caller_mm x v l_target
                 final_labs y = if y == x then l_target else caller_labs y
-                -- Return value depends on variables that influenced ret_expr and callee PC.
-                -- These influences in 'infl' are callee-local. We map them back to the caller.
-                callee_deps = Set.union (varsExpr ret_expr) pc_vars
-                -- For each callee_dep, find what it depended on in the caller (via initial new_infl in Call)
-                -- Actually, callee 'infl' already tracks dependencies back to caller variables!
-                -- Because 'new_infl' in 'Call' initialized parameters with caller vars.
-                total_caller_deps = Set.unions [ Map.findWithDefault Set.empty d infl | d <- Set.toList callee_deps ]
-                new_caller_infl = Map.insert x (Set.union total_caller_deps caller_pc_vars) caller_infl
+
+                -- Approach B: take the forward transitive closure of the
+                -- return-expression's variables (together with the callee's
+                -- accumulated pc_vars) through the callee's influence map.
+                -- Eager closure on Assign guarantees that this single closure
+                -- captures every callee-local that the return value depends on.
+                ret_seed = Set.union (varsExpr ret_expr) pc_vars
+                callee_total = inflClosure ret_seed infl
+
+                -- Resolve each name in the closure back into caller-side names:
+                --   * if it's a parameter, substitute the caller variables in
+                --     the corresponding argument expression (plus the caller's
+                --     pc_vars at the call site, already merged in at Call);
+                --   * else if it's a callee-introduced name, drop it (it has
+                --     no meaning in the caller's namespace);
+                --   * else keep it — it can only have arrived in the callee
+                --     infl via caller-side pc_vars (e.g. an enclosing `if`).
+                resolved = Set.unions
+                    [ case Map.lookup n arg_to_vars of
+                          Just caller_vars -> caller_vars
+                          Nothing
+                            | Set.member n callee_intro -> Set.empty
+                            | otherwise                 -> Set.singleton n
+                    | n <- Set.toList callee_total ]
+
+                -- Same conditional cleanup as Assign: only drop x from
+                -- existing caller-side dependency sets if the new x (the
+                -- return value) is independent of the old x. The new x's
+                -- deps are `resolved ∪ caller_pc_vars`, so the new x depends
+                -- on the old x exactly when x appears in either — e.g.
+                -- `x := call f(x)` (x reaches `resolved` through the args)
+                -- or `if x then x := call f(0)` (x in caller_pc_vars via the
+                -- enclosing branch).
+                new_x_deps = Set.union resolved caller_pc_vars
+                new_depends_on_old = Set.member x new_x_deps
+                cleaned_caller_infl = if new_depends_on_old
+                                      then caller_infl
+                                      else Map.map (Set.delete x) caller_infl
+                new_caller_infl = Map.insert x new_x_deps cleaned_caller_infl
             in (Stop, final_mm, final_labs, caller_pcs, i, o, s, new_caller_infl)
 
 step _ _ _ (Halt, mm, labs, pcs, i, o, s, infl) = (Halt, mm, labs, pcs, i, o, s, infl)
