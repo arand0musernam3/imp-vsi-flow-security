@@ -198,7 +198,13 @@ main = do
                   [42]
                   ShouldPass
                   True
-
+        , runTest "Input overwrites a value"
+                  Both
+                  "input(high, h); x := h; input(low, x); output(low, x)"
+                  [42, 99]
+                  ShouldPass
+                  True
+        
         -- Value-checking regression for the Call-arg fix: a high-labeled arg
         -- must reach the callee's high view. Before the fix, vals were read
         -- from m_pc=bottom view and the callee's parameter held 0 in every
@@ -669,6 +675,12 @@ main = do
                   [1, 0]
                   ShouldFail
                   True
+        , runStaticTest "The environment of variable restarts"
+                  "z := 1; input(top, a); input(high, s); if s then input(high, a) else skip; if a then z := 0 else skip; output(low, z)"
+                  ShouldFail
+        , runStaticTest "The environment of variable restarts (2)"
+                  "z := 1; input(top, a); input(high, a); if a then z := 0 else skip; output(low, z)"
+                  ShouldFail
         ]
 
 

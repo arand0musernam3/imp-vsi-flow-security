@@ -95,7 +95,7 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
     Skip -> WellTyped env infl
     Assign x e ->
         let l = exprType env e
-            l' = pc \/ l \/ env x
+            l' = pc \/ l
             -- Mirror the dynamic Assign: only clean x from other entries
             -- when the new x is independent of the old x. If the closure of
             -- the rhs's vars contains x (e.g. `x := x + 1`), the new x is
@@ -154,7 +154,7 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
                            then infl
                            else Map.map (Set.delete x) infl
                  new_infl = Map.insert x pc_vars cleaned
-             in WellTyped (updateEnv env x (ch \/ pc \/ env x)) new_infl
+             in WellTyped (updateEnv env x (ch \/ pc)) new_infl
     Output ch e ->
         let l = exprType env e
         in if not ((pc \/ l) <= ch)
