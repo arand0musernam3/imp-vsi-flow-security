@@ -6,45 +6,38 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Imp
 
--- Transitive closure for the partial order
 transitiveClosure :: Int -> [(Int, Int)] -> [[Bool]]
 transitiveClosure n relations = iterateClosure initial
   where
-    -- Helper to build a matrix
     matrix f = [[f i j | j <- [0 .. n - 1]] | i <- [0 .. n - 1]]
-    initial = matrix (\i j -> i == j || (i, j) `elem` relations) -- Inital matrix with givenflows and reflexivity
-    step m = matrix (\i j -> any (\k -> m !! i !! k && m !! k !! j) [0 .. n - 1]) -- If there is a transitive path from i to j through k, then i flows to j
-
-    -- recursivly apply step until no changes occur
+    initial = matrix (\i j -> i == j || (i, j) `elem` relations)
+    step m = matrix (\i j -> any (\k -> m !! i !! k && m !! k !! j) [0 .. n - 1])
     iterateClosure m =
       let next = step m
        in if next == m then m else iterateClosure next
 
--- Compute Join table (Least Upper Bound)
 computeJoinTable :: Int -> [[Bool]] -> [[Int]]
 computeJoinTable n flows =
   [[findLUB i j | j <- [0 .. n - 1]] | i <- [0 .. n - 1]]
   where
     findLUB i j =
-      let upperBounds = [k | k <- [0 .. n - 1], flows !! i !! k && flows !! j !! k] -- candidates that both i and j flow to
-          isLUB l = all (\u -> flows !! l !! u) upperBounds -- check if l flows to all upper bounds, if so then it must be the least upper bound
+      let upperBounds = [k | k <- [0 .. n - 1], flows !! i !! k && flows !! j !! k]
+          isLUB l = all (\u -> flows !! l !! u) upperBounds
        in case filter isLUB upperBounds of
             (lub : _) -> lub
             [] -> error $ "Lattice error: No LUB for indices " ++ show i ++ " and " ++ show j
 
--- Compute Meet table (Greatest Lower Bound)
 computeMeetTable :: Int -> [[Bool]] -> [[Int]]
 computeMeetTable n flows =
   [[findGLB i j | j <- [0 .. n - 1]] | i <- [0 .. n - 1]]
   where
     findGLB i j =
-      let lowerBounds = [k | k <- [0 .. n - 1], flows !! k !! i && flows !! k !! j] -- candidates that flow to both i and j
-          isGLB l = all (\lb -> flows !! lb !! l) lowerBounds -- check if all lower bounds flow to l, if so then it must be the greatest lower bound
+      let lowerBounds = [k | k <- [0 .. n - 1], flows !! k !! i && flows !! k !! j]
+          isGLB l = all (\lb -> flows !! lb !! l) lowerBounds
        in case filter isGLB lowerBounds of
             (glb : _) -> glb
             [] -> error $ "Lattice error: No GLB for indices " ++ show i ++ " and " ++ show j
 
--- Factory to build the SecurityLattice
 mkSecurityLattice :: [String] -> [(String, String)] -> SecurityLattice
 mkSecurityLattice names relations =
   let n = length names
@@ -52,10 +45,9 @@ mkSecurityLattice names relations =
       flows = transitiveClosure n relIndices
       joins = computeJoinTable n flows
       meets = computeMeetTable n flows
-      levels = [L name i joins meets flows names | (name, i) <- zip names [0 ..]] -- L is a lattice level
+      levels = [L name i joins meets flows names | (name, i) <- zip names [0 ..]]
    in SecurityLattice levels
 
--- Default levels
 stdLatticeNames = ["bottom", "low", "high", "top"]
 
 stdLatticeRelations = [("bottom", "low"), ("low", "high"), ("high", "top")]
@@ -71,7 +63,6 @@ highL = (latticeLevels stdLattice) !! 2
 
 topL = (latticeLevels stdLattice) !! 3
 
--- Flow-sensitive environment
 updateEnv :: Environment -> VarName -> Level -> Environment
 updateEnv env x l = \y -> if y == x then l else env y
 
@@ -81,9 +72,8 @@ joinEnv env1 env2 = \x -> (env1 x) \/ (env2 x)
 envFlowsTo :: [VarName] -> Environment -> Environment -> Bool
 envFlowsTo vars env1 env2 = all (\x -> (env1 x) <= (env2 x)) vars
 
--- Expression Typing
 exprType :: Environment -> Expr -> Level
-exprType _ (IntExpr _) = bottomL -- Literals are bottom (public)
+exprType _ (IntExpr _) = bottomL
 exprType env (VarExpr x) = env x
 exprType env (BinOpExpr _ e1 e2) =
   (exprType env e1) \/ (exprType env e2)
@@ -93,7 +83,6 @@ data TypeRes = WellTyped Environment Influences | TypeError String
 -- Summary table for functions: (FunctionName, [ArgLevels], PCLevel) -> ReturnLevel
 type FuncSummaries = Map.Map (String, [Level], Level) Level
 
--- Helper for typing with summaries
 cmdType' :: [Function] -> FuncSummaries -> [VarName] -> Environment -> (Level, Set.Set VarName) -> Influences -> Cmd -> TypeRes
 cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
   Skip -> WellTyped env infl
@@ -194,12 +183,10 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
         let argLevels = map (exprType env) args
          in case Map.lookup (fName, argLevels, pc) summaries of
               Just retLevel ->
-                -- Static can't peek into the callee's per-iteration
-                -- influence map (the summary only carries retLevel),
-                -- so we approximate Approach B by taking the eager
-                -- transitive closure of the argument variables within
-                -- the caller's own infl. This captures everything the
-                -- caller can know about which variables flowed in.
+                -- Static can't peek into the callee's per-iteration influence
+                -- map (the summary only carries retLevel), so we approximate
+                -- the dynamic Return by taking the eager transitive closure of
+                -- the argument variables within the caller's own infl.
                 let arg_vars = Set.unions (map varsExpr args)
                     arg_closure = Imp.inflClosure arg_vars infl
                     new_x_deps = Set.union arg_closure pc_vars
@@ -293,13 +280,10 @@ computeSummaries lat fns = verified
             let retL = exprType envAfter (funcReturn f)
         ]
 
--- Wrap original cmdType to use summaries
 cmdType lat fns vars env pc cmd =
   let summaries = computeSummaries lat fns
       initialInfl = Map.empty
    in cmdType' fns summaries vars env (pc, Set.empty) initialInfl cmd
-
--- EXAMPLES
 
 initEnv :: SecurityLattice -> Environment
 initEnv lat = \_ -> head (latticeLevels lat)

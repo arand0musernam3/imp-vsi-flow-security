@@ -9,8 +9,7 @@ import Types (TypeRes (..), cmdType, initEnv)
 data Expectation = ShouldPass | ShouldFail
   deriving (Eq, Show)
 
--- Run a program silently and return the full execution result so test
--- runners can check values and print the security report.
+-- Run a program silently; return the full execution state.
 runCapture ::
   ExecMode ->
   String ->
@@ -25,9 +24,8 @@ runCapture mode prog inputs = case parseImp prog of
           Finished mm labs o infl p -> return (mm, labs, o, infl, p, lat, vars)
           OutOfFuel                 -> error "OutOfFuel"
 
--- Static analysis only: parse, run cmdType, check whether it returns
--- WellTyped or TypeError. Does not execute the program — TypeError is
--- a returned value, not a thrown exception.
+-- Static type-check only; does not execute. TypeError is a returned value,
+-- not a thrown exception.
 staticTest :: String -> String -> Expectation -> IO Bool
 staticTest name prog expected = do
   putStrLn ""
@@ -56,9 +54,8 @@ staticTest name prog expected = do
   where
     shortenS s = if length s > 250 then take 250 s ++ "..." else s
 
--- Value test: run the program and compare the outputs emitted on the
--- given lattice level (matched by level name, e.g. "low", "L1").
--- Pass showReport = False to suppress the post-run security report.
+-- Run the program and compare the outputs emitted on the named level
+-- (e.g. "low", "L1"). Pass showReport = False to suppress the report.
 runValueTest ::
   String ->
   ExecMode ->
@@ -376,7 +373,9 @@ main = do
           [0, 42]
           ShouldFail
           True,
-        -- DEEP ERASURE TESTS -- TODO currently there is no way to automatically check the contents of a variable on a specific label, it requires a manuall check (since checking if output(high, x) gives 0 throws an error, for x that was erased to top)
+        ---------------------------------------------------------------------
+        -- DEEP ERASURE
+        ---------------------------------------------------------------------
 
         runValueTest
           "Deep Erasure: data flow (x depends on y)"
@@ -463,7 +462,7 @@ main = do
           ShouldFail
           True,
         runValueTest
-          "Deep Erasure: prevent erasure after influencing varuable overwrite"
+          "Deep Erasure: prevent erasure after influencing variable overwrite"
           DynamicNSU
           "input(high, c); x:= 5; v := x; input(high, x); if c then erase(top, x) else skip; output(low, v)"
           [1, 10]
@@ -616,7 +615,7 @@ main = do
         ---------------------------------------------------------------------
         -- FUNCTION LOCALS AT CALLER'S PC: a callee body that assigns to a
         -- local can now run under a high caller PC, because non-arg locals
-        -- are initialized to `pc` rather than ⊥ (PLAS '09 [U-REF] analog).
+        -- are initialized to `pc` rather than ⊥.
         ---------------------------------------------------------------------
 
         -- The call is under high pc and the result is assigned to a target

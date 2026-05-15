@@ -7,17 +7,12 @@ import qualified Data.Set as Set
 import Imp
 import Parser (parseImp)
 
--- ANSI color helpers (raw escape codes, no extra dependency needed)
 color :: String -> String -> String
 color code s = code ++ s ++ "\x1b[0m"
 
-bold, dim, red, green, yellow, cyan :: String -> String
+bold, dim :: String -> String
 bold = color "\x1b[1m"
 dim = color "\x1b[2m"
-red = color "\x1b[31m"
-green = color "\x1b[32m"
-yellow = color "\x1b[33m"
-cyan = color "\x1b[36m"
 
 boldRed, boldGreen, boldCyan, boldYellow :: String -> String
 boldRed = color "\x1b[1;31m"
@@ -25,14 +20,6 @@ boldGreen = color "\x1b[1;32m"
 boldCyan = color "\x1b[1;36m"
 boldYellow = color "\x1b[1;33m"
 
--- "Initialized-to-zero" memory, occasionally handy as a starting point.
-mZ :: Memory
-mZ = \_ -> 0
-
--- Helper functions to run programs
-
--- Run program with specified security mode
--- showReport controls whether the security report is printed after execution.
 runModeWithInput :: Bool -> ExecMode -> Program -> [Value] -> IO ()
 runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
   putStrLn $ "AST: " ++ show prog
@@ -122,7 +109,6 @@ printSecurityReport lat vars mm labs outputs infl partials = do
     padR n s = s ++ replicate (max 0 (n - length s)) ' '
     padL n s = replicate (max 0 (n - length s)) ' ' ++ s
 
--- run program with fuel n and print the variable values and output
 runF :: Integer -> Bool -> ExecMode -> SecurityLattice -> [Function] -> [VarName] -> Configuration -> IO ()
 runF n showReport mode lat fns vars cfg =
   case evalF n mode lat fns cfg of

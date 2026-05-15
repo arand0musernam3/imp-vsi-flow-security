@@ -11,7 +11,6 @@ type VarName = String
 
 type Value = Integer
 
--- Generic Security Level
 data Level = L
   { lName :: String,
     lId :: Int,
@@ -34,7 +33,6 @@ instance Ord Level where
 instance Show Level where
   show l = lName l
 
--- The Lattice instance now uses the pre-computed tables
 instance Lattice Level where
   l1 \/ l2 =
     let nextId = (lJoinTable l1) !! (lId l1) !! (lId l2)
@@ -44,7 +42,6 @@ instance Lattice Level where
     let nextId = (lMeetTable l1) !! (lId l1) !! (lId l2)
      in l1 {lId = nextId, lName = (lAllNames l1) !! nextId}
 
--- Lattice representation
 data SecurityLattice = SecurityLattice
   { latticeLevels :: [Level]
   }
@@ -104,20 +101,16 @@ varsCmd Stop = Set.empty
 varsCmd Halt = Set.empty
 varsCmd ResetPC = Set.empty
 
--- Get all variables used in a command
 getVars :: Cmd -> [VarName]
 getVars cmd = Set.toList (varsCmd cmd)
 
--- Memory is a function from Variables to Values
 type Memory = VarName -> Value
 
--- MultiMemory stores a memory view for each security level ID
+-- One memory view per security level, keyed by lId.
 type MultiMemory = Map.Map Int Memory
 
--- Dynamic labels for variables
 type Labels = VarName -> Level
 
--- memory update
 update :: Memory -> VarName -> Value -> Memory
 update m x v = \y -> if y == x then v else m y
 
@@ -131,15 +124,13 @@ type Influences = Map.Map VarName (Set.Set VarName)
 -- empty under DynamicNSU / Untyped.
 type Partials = Set.Set VarName
 
--- A stack frame holds the saved caller state plus, for the precise Approach B
--- of callee-to-caller dependency mapping:
---   * `calleeIntroNames` — every name introduced inside the callee (its params
---     plus all variables that appear in its body). Used at Return to drop
---     callee-only names from the dependency set.
---   * `argToVars` — for each parameter p, the set of caller-side variables
---     that appeared in the corresponding argument expression (joined with the
---     caller's pc_vars at the call site). Used at Return to substitute back
---     into the caller's namespace.
+-- Saved caller state plus the two extras needed at Return to translate
+-- callee-internal dependencies back into the caller's namespace:
+--   * `calleeIntroNames` — names introduced inside the callee (params plus
+--     body locals). Dropped from dependency sets at Return.
+--   * `argToVars` — for each parameter p, the caller-side variables that
+--     fed the i-th argument expression, joined with the caller's pc_vars
+--     at the call site. Substituted in at Return.
 type StackFrame =
   ( VarName,
     MultiMemory,
@@ -153,9 +144,7 @@ type StackFrame =
 
 type Stack = [StackFrame]
 
--- A configuration bundles the entire machine state that the small-step
--- semantics rewrites. See proud-enchanting-mountain.md Part I.8 for the
--- mathematical specification.
+-- The full machine state rewritten by the small-step semantics.
 data Configuration = Configuration
   { cfgCmd      :: Cmd                -- current command
   , cfgMem      :: MultiMemory        -- per-level memory views
@@ -165,12 +154,10 @@ data Configuration = Configuration
   , cfgOutput   :: [(Level, Value)]   -- output tape Out
   , cfgStack    :: Stack              -- call stack S
   , cfgInfl     :: Influences         -- influence map I
-  , cfgPartials :: Partials           -- partial-leak set P (used only by DynamicPU)
+  , cfgPartials :: Partials           -- partial-leak set P
   }
 
--- Build the initial configuration κ₀ for command c on input tape `is`.
--- Variables are at ⊥, every memory view is the all-zero map, the PC stack
--- carries a single ⊥-context, the partial-leak set is empty.
+-- Fresh configuration: every variable at ⊥, every memory view zero, empty P.
 initialConfig :: SecurityLattice -> Cmd -> [Value] -> Configuration
 initialConfig lat c is =
   let bottom = head (latticeLevels lat)
@@ -186,13 +173,9 @@ initialConfig lat c is =
         , cfgPartials = Set.empty
         }
 
--- Forward transitive closure of `seed` through the influence map: starting
--- from a set of variables, repeatedly union in their direct dependencies until
--- nothing new appears. Used by Assign to keep `infl[x]` "eager" — every
--- transitive dependency is recorded directly, so dependency chains survive
--- subsequent reassignments that would otherwise drop intermediate vars.
--- (Named `inflClosure` to avoid clashing with `Types.transitiveClosure`,
--- which computes the reflexive-transitive closure of the lattice flow matrix.)
+-- Forward transitive closure of `seed` through the influence map: repeatedly
+-- union in direct dependencies until nothing new appears. Named to avoid
+-- clashing with `Types.transitiveClosure` (the lattice flow matrix).
 inflClosure :: Set.Set VarName -> Influences -> Set.Set VarName
 inflClosure seed infl = go seed seed
   where
@@ -209,15 +192,12 @@ inflClosure seed infl = go seed seed
 
 data ExecMode = Untyped | DynamicNSU | DynamicPU deriving (Eq, Show)
 
--- Future variants: DynamicFaceted, ...
-
--- Helper to get the current memory view for a level
 getMem :: MultiMemory -> Level -> Memory
 getMem mm l = case Map.lookup (lId l) mm of
   Just m -> m
   Nothing -> \_ -> 0
 
--- Helper to update multi-memory for all levels >= targetLevel
+-- Write v to x at every view ≥ targetLevel.
 updateMultiMemory :: SecurityLattice -> MultiMemory -> VarName -> Value -> Level -> MultiMemory
 updateMultiMemory lat mm x v targetLevel =
   foldl
@@ -229,7 +209,7 @@ updateMultiMemory lat mm x v targetLevel =
     mm
     (latticeLevels lat)
 
--- Helper to erase variable from multi-memory for all levels <= targetLevel
+-- Zero x at every view ⋡ targetLevel (i.e. strictly below or incomparable).
 eraseMultiMemory :: SecurityLattice -> MultiMemory -> VarName -> Level -> MultiMemory
 eraseMultiMemory lat mm x targetLevel =
   foldl
@@ -241,14 +221,12 @@ eraseMultiMemory lat mm x targetLevel =
     mm
     (latticeLevels lat)
 
--- Expression level (join of all variables' labels)
 getExprLevel :: Expr -> Labels -> Level -> Level
 getExprLevel (IntExpr _) _ bottom = bottom
 getExprLevel (VarExpr x) labs _ = labs x
 getExprLevel (BinOpExpr _ e1 e2) labs bottom =
   (getExprLevel e1 labs bottom) \/ (getExprLevel e2 labs bottom)
 
--- (Big-step) semantics of expressions
 exprEval :: Expr -> Memory -> Value
 exprEval (IntExpr n) _ = n
 exprEval (VarExpr x) m = m x
@@ -280,13 +258,9 @@ getDependents y infl =
              in recurse next_todo (Set.insert v acc)
    in recurse (Set.singleton y) Set.empty
 
--- SMALL-STEP SEMANTICS OF COMMANDS
-
--- Top-level dispatch. Each command constructor delegates to a per-rule
--- helper. Helpers read the record fields they need (via RecordWildCards)
--- and return the updated configuration with record-update syntax. The
--- structure mirrors proud-enchanting-mountain.md Part VII: every M-Foo
--- rule corresponds 1:1 to a stepFoo function below.
+-- Small-step semantics. Each command constructor delegates to a per-rule
+-- helper that reads the record fields it needs and returns the updated
+-- configuration.
 step :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Configuration
 step mode lat fns cfg = case cfgCmd cfg of
   Skip            -> cfg {cfgCmd = Stop}
@@ -330,9 +304,8 @@ stepSeq mode lat fns cfg c1 c2 = case c1 of
           Halt -> cfg' {cfgCmd = Halt}
           c1'  -> cfg' {cfgCmd = Seq c1' c2}
 
--- M-If: push pc ⊔ ℓ_e onto the PC stack, choose branch via memory at the
--- raised view. Under DynamicPU the deferred PU check fires here: if any
--- variable read by `e` is in P, abort.
+-- Under DynamicPU the deferred PU check fires here: if any variable read by
+-- `e` is in P, abort.
 stepIf :: ExecMode -> SecurityLattice -> Configuration -> Expr -> Cmd -> Cmd -> Configuration
 stepIf mode lat cfg@Configuration {..} e c1 c2 =
   case puBranchViolation mode (varsExpr e) cfgPartials of
@@ -348,9 +321,6 @@ stepIf mode lat cfg@Configuration {..} e c1 c2 =
           next     = if taken then Seq c1 ResetPC else Seq c2 ResetPC
        in cfg {cfgCmd = next, cfgPCs = (newPc, newPcVrs) : cfgPCs}
 
--- M-Assign: NSU check `pc ⊑ Γ(x)`, then write at level pc ⊔ ℓ_e and update
--- labels and influences. The conditional cleanup keeps x in dependency sets
--- iff the new value transitively depends on the old x (see comment block).
 stepAssign :: ExecMode -> SecurityLattice -> Configuration -> VarName -> Expr -> Configuration
 stepAssign mode lat cfg@Configuration {..} x e =
   let pc       = getPCLevel cfgPCs
@@ -366,34 +336,31 @@ stepAssign mode lat cfg@Configuration {..} x e =
         Right newP ->
           let newMem    = updateMultiMemory lat cfgMem x v l_target
               newLabs y = if y == x then l_target else cfgLabs y
-              -- Drop x from other variables' deps only when the new x is
-              -- independent of the old x (i.e. x ∉ closure of fv(e)). For
-              -- a reflexive update like `x := x + 1`, x is in the closure,
-              -- so we keep the old links.
+              -- Only drop x from other variables' deps when the new x is
+              -- independent of the old x (x ∉ closure of fv(e)). A reflexive
+              -- update like `x := x + 1` keeps x in the closure, so other
+              -- variables' references to x must stay.
               preClosure       = inflClosure (varsExpr e) cfgInfl
               newDependsOnOld  = Set.member x preClosure
               cleaned          =
                 if newDependsOnOld
                   then cfgInfl
                   else Map.map (Set.delete x) cfgInfl
-              -- Eager closure: keep dependency chains intact across
+              -- Eager closure keeps dependency chains intact across
               -- intermediate reassignments.
               depsClosure = inflClosure (varsExpr e) cleaned
               newInfl     = Map.insert x (Set.union depsClosure pcVars) cleaned
            in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
 
--- M-Input: side-channel check `pc ⊑ ch`, then NSU check `pc ⊑ Γ(x)`. New
--- x is taken from the head of the input tape. The new x is independent of
--- the old x unless we're inside a branch whose condition mentions x.
+-- The side-channel check `pc ⊑ ch` is a flow check on the channel itself,
+-- not an NSU check; PU does NOT relax it.
 stepInput :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepInput mode lat cfg@Configuration {..} ch x =
   let pc        = getPCLevel cfgPCs
       pcVars    = getPCVars cfgPCs
       l_target  = ch \/ pc
       monitorOn = mode == DynamicNSU || mode == DynamicPU
-   in -- The side-channel check is a flow check on the channel itself, not
-      -- an NSU check; PU does NOT relax it.
-      if monitorOn && not (pc <= ch)
+   in if monitorOn && not (pc <= ch)
         then
           error $
             "Dynamic Monitor Exception: side-channel violation at input from channel "
@@ -424,9 +391,9 @@ stepInput mode lat cfg@Configuration {..} ch x =
                   newInfl   = Map.insert x pcVars cleaned
                in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInput = vs, cfgInfl = newInfl, cfgPartials = newP}
 
--- M-Output: flow check (ℓ_e ⊔ pc) ⊑ ch. The memory view chosen is M#ch
--- rather than M#(pc ⊔ ℓ_e); legal because ch dominates the target view
--- when the flow check passes, and the read never fires when it fails.
+-- Reads at M#ch rather than M#(pc ⊔ ℓ_e). Legal because ch dominates the
+-- target view when the flow check passes, and the read never fires when it
+-- fails.
 stepOutput :: ExecMode -> SecurityLattice -> Configuration -> Level -> Expr -> Configuration
 stepOutput mode lat cfg@Configuration {..} ch e =
   let v       = exprEval e (getMem cfgMem ch)
@@ -448,15 +415,10 @@ stepOutput mode lat cfg@Configuration {..} ch e =
               ++ "."
         else cfg {cfgCmd = Stop, cfgOutput = cfgOutput ++ [(ch, v)]}
 
--- M-Erase: NSU check `pc ⊑ Γ(x)`, then for every dependent v of x (forward
--- closure through the influence map) zero v at views ⋢ (ℓ_cmd ⊔ Γ(v) ⊔ pc)
--- and raise its label. pc_vars are *unioned* into deps, not assigned, so a
--- later erase still finds the same dependents.
---
--- Under DynamicPU the NSU check is deferred: if `pc ⋢ Γ(x)`, the erase is
--- allowed but every dependent is added to P (its post-erase memory state at
--- low views reflects an upgrade decision). P also propagates from x itself
--- (if x was already P-marked) to its dependents.
+-- Under DynamicPU the NSU check is deferred: if `pc ⋢ Γ(x)` the erase is
+-- allowed but every dependent enters P (its post-erase memory state at low
+-- views reflects an upgrade decision). P also propagates from x to its
+-- dependents.
 stepErase :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepErase mode lat cfg@Configuration {..} l_cmd x =
   let pc      = getPCLevel cfgPCs
@@ -499,10 +461,9 @@ stepErase mode lat cfg@Configuration {..} l_cmd x =
                   else cfgPartials
            in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
 
--- M-Call: build the callee's memory and labels, save the caller frame
--- (including the maps needed to translate callee-side names back at
--- Return), and push the body. Non-parameter locals start at the caller's
--- pc rather than ⊥, matching PLAS'09 [U-REF].
+-- Non-parameter locals start at the caller's pc rather than ⊥; without
+-- this, any function body containing an assignment would be un-callable
+-- under a non-bottom pc (the first assignment would fail NSU).
 stepCall :: SecurityLattice -> [Function] -> Configuration -> VarName -> String -> [Expr] -> Configuration
 stepCall lat fns cfg@Configuration {..} x fName args =
   case filter (\f -> funcName f == fName) fns of
@@ -537,14 +498,9 @@ stepCall lat fns cfg@Configuration {..} x fName args =
             , cfgInfl  = Map.empty
             }
 
--- M-Return: NSU check at the receiver, then write the return value into
--- the caller's `x`. Resolves the callee-internal influence closure back
--- into caller-side names via `argToVars` (see Approach B comment).
---
--- Under DynamicPU the NSU check is deferred via applyNsu, using
--- `resolved ∪ callerPcVars` as the carriers of P. Callee-introduced names
--- in P are dropped at the boundary — they have no meaning in the caller's
--- namespace.
+-- Under DynamicPU, callee-introduced P entries are dropped at the boundary;
+-- they have no meaning in the caller's namespace. Caller-side P entries
+-- survive.
 stepReturn :: ExecMode -> SecurityLattice -> Configuration -> Configuration
 stepReturn mode lat cfg@Configuration {..} = case cfgStack of
   [] -> error "Return with empty call stack"
@@ -594,7 +550,6 @@ stepReturn mode lat cfg@Configuration {..} = case cfgStack of
                   , cfgPartials = newP
                   }
 
--- Shared error formatter for NSU violations.
 nsuMsg :: String -> VarName -> Level -> Level -> String
 nsuMsg site x pc curLab =
   "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at "
@@ -653,8 +608,6 @@ puBranchViolation DynamicPU eVars p
         ++ "a non-flowing PC); branching on them would observe that decision."
 puBranchViolation _ _ _ = Right ()
 
--- INFRASTRUCTURE
-
 data Result = Finished MultiMemory Labels [(Level, Value)] Influences Partials | OutOfFuel
 
 evalF :: Integer -> ExecMode -> SecurityLattice -> [Function] -> Configuration -> Result
@@ -663,7 +616,7 @@ evalF n mode lat fns cfg =
   let cfg' = step mode lat fns cfg
       done = Finished (cfgMem cfg') (cfgLabs cfg') (cfgOutput cfg') (cfgInfl cfg') (cfgPartials cfg')
    in case cfgCmd cfg' of
-        Halt                        -> done -- Halt terminates regardless of stack depth
+        Halt                        -> done
         Stop | null (cfgStack cfg') -> done
         _                           -> evalF (n - 1) mode lat fns cfg'
 

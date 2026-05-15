@@ -10,10 +10,8 @@ import Text.Parsec.String (Parser)
 import qualified Text.Parsec.Token as Token
 import Types (mkSecurityLattice, stdLatticeNames, stdLatticeRelations)
 
--- Use SecurityLattice as state
 type LParser a = Parsec String SecurityLattice a
 
--- Lexer definition
 lexer :: Token.GenTokenParser String SecurityLattice Identity
 lexer = Token.makeTokenParser style
   where
@@ -58,7 +56,6 @@ comma = Token.comma lexer
 
 whiteSpace = Token.whiteSpace lexer
 
--- Level Parser
 level :: LParser Level
 level = do
   name <- identifier
@@ -67,7 +64,6 @@ level = do
     (l : _) -> return l
     [] -> fail $ "Level " ++ name ++ " not found in lattice"
 
--- Expression Parser
 expression :: LParser Expr
 expression = buildExpressionParser operators term
   where
@@ -82,7 +78,6 @@ expression = buildExpressionParser operators term
         <|> (IntExpr <$> integer)
         <|> (VarExpr <$> identifier)
 
--- Command Parser
 command :: LParser Cmd
 command = do
   cmds <- statement `sepBy1` reservedOp ";"
@@ -146,7 +141,6 @@ commandBlock = braces command <|> parens command <|> statement
 semiSep1 :: LParser a -> LParser [a]
 semiSep1 p = p `sepBy1` reservedOp ";"
 
--- Function Parser
 functionDef :: LParser Function
 functionDef = do
   reserved "def"
@@ -192,7 +186,6 @@ latticeDef =
       v <- identifier
       return (u, v)
 
--- Program Parser
 program :: LParser Program
 program = do
   whiteSpace
@@ -203,6 +196,5 @@ program = do
   lat <- getState
   return $ Program lat fns mainCmd
 
--- Main Parser
 parseImp :: String -> Either ParseError Program
 parseImp = runParser (whiteSpace >> program <* eof) (mkSecurityLattice stdLatticeNames stdLatticeRelations) ""
