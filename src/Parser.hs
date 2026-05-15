@@ -29,7 +29,6 @@ lexer = Token.makeTokenParser style
               "else",
               "while",
               "do",
-              "stop",
               "input",
               "output",
               "def",
@@ -93,7 +92,6 @@ command = do
 statement :: LParser Cmd
 statement =
   (reserved "skip" >> return Skip)
-    <|> (reserved "stop" >> return Halt)
     <|> ( reserved "input"
             >> parens
               ( do

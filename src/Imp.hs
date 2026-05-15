@@ -97,7 +97,7 @@ data Cmd
   | Call VarName String [Expr]
   | Return
   | Stop -- Internal: "this command has finished"; absorbed by Seq.
-  | Halt -- User-facing `stop` keyword: halts the entire program.
+  | Halt -- Internal: halts the entire program (not user-writable).
   | ResetPC -- Internal: pop the top of the PC stack on If/While exit.
   deriving (Eq, Show)
 
@@ -594,7 +594,7 @@ evalF 0 _ _ _ _ = OutOfFuel
 evalF n mode lat fns config =
   let config'@(c', mm', labs', pcs', i', o', s', infl') = step mode lat fns config
    in case c' of
-        Halt -> Finished mm' labs' o' infl' -- `stop` halts regardless of stack depth
+        Halt -> Finished mm' labs' o' infl' -- Halt terminates regardless of stack depth
         Stop | null s' -> Finished mm' labs' o' infl'
         _ -> evalF (n - 1) mode lat fns config'
 

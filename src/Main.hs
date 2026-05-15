@@ -282,44 +282,6 @@ main = do
           "Static accepts call to f with arg levels that DO verify, even though other combos fail"
           "def f(a) { output(low, a) } return 0; x := 7; y := call f(x)"
           ShouldPass,
-        -- `stop` semantics: it must halt the entire program from any
-        -- syntactic position. Before introducing Halt, the user's `stop`
-        -- and the internal "command finished" marker were the same
-        -- constructor, and `Seq` could not distinguish them — so any
-        -- `stop` followed by code (or surfacing from an if-branch, or
-        -- nested in a function body) crashed with `step Stop = error`.
-        runValueTest
-          "stop alone halts cleanly"
-          DynamicNSU
-          "x := 1; output(low, x); stop"
-          []
-          "low"
-          [1]
-          True,
-        runValueTest
-          "stop in middle of sequence suppresses subsequent code"
-          DynamicNSU
-          "x := 1; output(low, x); stop; output(low, 99)"
-          []
-          "low"
-          [1]
-          True,
-        runValueTest
-          "stop in if-branch halts (taken branch)"
-          DynamicNSU
-          "x := 1; output(low, x); if x then stop else skip; output(low, 99)"
-          []
-          "low"
-          [1]
-          True,
-        runValueTest
-          "stop inside function halts the entire program"
-          DynamicNSU
-          "def f(a) { output(low, a); stop } return 0; y := call f(7); output(low, 99)"
-          []
-          "low"
-          [7]
-          True,
         runValueTest
           "Function locals default to bottom"
           DynamicNSU
