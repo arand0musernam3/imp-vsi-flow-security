@@ -1,8 +1,6 @@
 module Main where
 
 import Control.Exception (SomeException, try)
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 import Examples
 import Imp
 import Parser (parseImp)
@@ -17,24 +15,15 @@ runCapture ::
   ExecMode ->
   String ->
   [Value] ->
-  IO (MultiMemory, Labels, [(Level, Value)], Influences, SecurityLattice, [VarName])
+  IO (MultiMemory, Labels, [(Level, Value)], Influences, Partials, SecurityLattice, [VarName])
 runCapture mode prog inputs = case parseImp prog of
   Left err -> error (show err)
   Right (Program lat fns mainCmd) ->
-    let bot = head (latticeLevels lat)
-        initLabs = \_ -> bot
-        initialMM = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
-        initialPC = (bot, Set.empty)
-        initialInfluences = Map.empty
-        vars = getVars mainCmd
-     in case evalF
-          1000
-          mode
-          lat
-          fns -- 1000 fuel
-          (mainCmd, initialMM, initLabs, [initialPC], inputs, [], [], initialInfluences) of
-          Finished mm labs o infl -> return (mm, labs, o, infl, lat, vars)
-          OutOfFuel -> error "OutOfFuel"
+    let vars = getVars mainCmd
+        cfg  = initialConfig lat mainCmd inputs
+     in case evalF 1000 mode lat fns cfg of
+          Finished mm labs o infl p -> return (mm, labs, o, infl, p, lat, vars)
+          OutOfFuel                 -> error "OutOfFuel"
 
 -- Static analysis only: parse, run cmdType, check whether it returns
 -- WellTyped or TypeError. Does not execute the program — TypeError is
@@ -94,10 +83,10 @@ runValueTest name mode prog inputs levelName expected showReport = do
       IO
         ( Either
             SomeException
-            (MultiMemory, Labels, [(Level, Value)], Influences, SecurityLattice, [VarName])
+            (MultiMemory, Labels, [(Level, Value)], Influences, Partials, SecurityLattice, [VarName])
         )
   let (passed, msg) = case result of
-        Right (_, _, o, _, lat, _)
+        Right (_, _, o, _, _, lat, _)
           | not (any ((== levelName) . lName) (latticeLevels lat)) ->
               (False, "level " ++ levelName ++ " not in lattice")
           | otherwise ->
@@ -115,8 +104,8 @@ runValueTest name mode prog inputs levelName expected showReport = do
   putStrLn $ "  >>> " ++ (if passed then boldGreen "PASS" else boldRed "FAIL") ++ " - " ++ dim msg
   if showReport
     then case result of
-      Right (mm, labs, o, infl, lat, vars) ->
-        printSecurityReport lat vars mm labs o infl
+      Right (mm, labs, o, infl, p, lat, vars) ->
+        printSecurityReport lat vars mm labs o infl p
       Left _ ->
         putStrLn (dim "  (no security report — execution terminated with error)")
     else return ()
@@ -676,6 +665,75 @@ main = do
           "Static While: trivial loop (no env change) accepted"
           "input(low, c); x := 5; while c do skip; output(low, x)"
           ShouldPass,
+        ---------------------------------------------------------------------
+        -- PERMISSIVE UPGRADE: PU accepts a strict superset of NSU-accepted
+        -- programs. Where NSU aborts at the upgrade site, PU allows the
+        -- write, raises the target's label to pc ⊔ ℓ_e, and records the
+        -- target in P. The deferred abort fires at a later branch that
+        -- reads a P-marked variable.
+        ---------------------------------------------------------------------
+
+        -- Classical PU example. Under NSU this same program ShouldFail
+        -- (see "NSU on assignment (branch taken, secret=1)" earlier).
+        -- Under PU the upgrade x is allowed; x ends up at label high with
+        -- x ∈ P; output(high, x) is fine because the channel dominates.
+        runValueTest
+          "PU accepts where NSU rejects (output at high)"
+          DynamicPU
+          "input(high, secret); x := 0; if secret then x := 1 else skip; output(high, x)"
+          [1]
+          "high"
+          [1]
+          True,
+        -- PU does NOT compromise non-interference at outputs: even though
+        -- the upgrade is allowed, x's raised label still blocks an output
+        -- at a non-dominating channel.
+        runTest
+          "PU still catches the leak via labels (output at low)"
+          DynamicPU
+          "input(high, secret); x := 0; if secret then x := 1 else skip; output(low, x)"
+          [1]
+          ShouldFail
+          True,
+        -- The headline deferred-abort case: branching on x after x was
+        -- upgraded into P aborts under PU.
+        runTest
+          "PU rejects branch on P-marked variable"
+          DynamicPU
+          "input(high, secret); x := 0; if secret then x := 1 else skip; if x then output(high, 1) else output(high, 0)"
+          [1]
+          ShouldFail
+          True,
+        -- Same program as the accept-case above with the opposite input.
+        -- NSU rejects regardless of input (path-insensitive); PU accepts
+        -- both paths uniformly.
+        runValueTest
+          "PU accepts the false-branch case symmetrically"
+          DynamicPU
+          "input(high, secret); x := 0; if secret then x := 1 else skip; output(high, x)"
+          [0]
+          "high"
+          [0]
+          True,
+        -- Direct flow leak is caught by the channel/label flow check, not
+        -- by NSU or PU. Both modes reject this.
+        runTest
+          "PU agrees with NSU on a direct flow leak"
+          DynamicPU
+          "input(high, secret); output(low, secret)"
+          [42]
+          ShouldFail
+          True,
+        -- PU permissiveness extends to the function-return NSU check. The
+        -- same program is ShouldFail at "NSU on function return".
+        runValueTest
+          "PU permissive at function return"
+          DynamicPU
+          "def f(a) { skip } return a; input(high, secret); x := 0; if secret then x := call f(0) else skip; output(high, x)"
+          [1]
+          "high"
+          [0]
+          True,
         ---------------------------------------------------------------------
         -- INFLUENCE-MAP CLEANUP IN CONDITIONAL CONTEXT.
         -- pc_vars must be carried into the new dep set, even when cleaning.

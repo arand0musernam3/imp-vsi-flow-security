@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Imp where
 
 import Algebra.Lattice
@@ -138,10 +140,15 @@ type Labels = VarName -> Level
 update :: Memory -> VarName -> Value -> Memory
 update m x v = \y -> if y == x then v else m y
 
--- Configuration includes current command, multi-memory, labels, PC stack, input, output, call stack, and influences
 type PCContext = (Level, Set.Set VarName)
 
 type Influences = Map.Map VarName (Set.Set VarName)
+
+-- Partials: variables whose current value carries information about a branch
+-- the monitor allowed under a non-flowing PC (Permissive Upgrade). Reading
+-- such a variable as a branch condition aborts under DynamicPU. Always
+-- empty under DynamicNSU / Untyped.
+type Partials = Set.Set VarName
 
 -- A stack frame holds the saved caller state plus, for the precise Approach B
 -- of callee-to-caller dependency mapping:
@@ -165,7 +172,38 @@ type StackFrame =
 
 type Stack = [StackFrame]
 
-type Configuration = (Cmd, MultiMemory, Labels, [PCContext], [Value], [(Level, Value)], Stack, Influences)
+-- A configuration bundles the entire machine state that the small-step
+-- semantics rewrites. See proud-enchanting-mountain.md Part I.8 for the
+-- mathematical specification.
+data Configuration = Configuration
+  { cfgCmd      :: Cmd                -- current command
+  , cfgMem      :: MultiMemory        -- per-level memory views
+  , cfgLabs     :: Labels             -- dynamic label environment Γ
+  , cfgPCs      :: [PCContext]        -- PC stack π
+  , cfgInput    :: [Value]            -- input tape In
+  , cfgOutput   :: [(Level, Value)]   -- output tape Out
+  , cfgStack    :: Stack              -- call stack S
+  , cfgInfl     :: Influences         -- influence map I
+  , cfgPartials :: Partials           -- partial-leak set P (used only by DynamicPU)
+  }
+
+-- Build the initial configuration κ₀ for command c on input tape `is`.
+-- Variables are at ⊥, every memory view is the all-zero map, the PC stack
+-- carries a single ⊥-context, the partial-leak set is empty.
+initialConfig :: SecurityLattice -> Cmd -> [Value] -> Configuration
+initialConfig lat c is =
+  let bottom = head (latticeLevels lat)
+   in Configuration
+        { cfgCmd      = c
+        , cfgMem      = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
+        , cfgLabs     = \_ -> bottom
+        , cfgPCs      = [(bottom, Set.empty)]
+        , cfgInput    = is
+        , cfgOutput   = []
+        , cfgStack    = []
+        , cfgInfl     = Map.empty
+        , cfgPartials = Set.empty
+        }
 
 -- Forward transitive closure of `seed` through the influence map: starting
 -- from a set of variables, repeatedly union in their direct dependencies until
@@ -188,9 +226,9 @@ inflClosure seed infl = go seed seed
               new_frontier = Set.difference next acc
            in go (Set.union acc new_frontier) new_frontier
 
-data ExecMode = Untyped | DynamicNSU deriving (Eq, Show)
+data ExecMode = Untyped | DynamicNSU | DynamicPU deriving (Eq, Show)
 
--- Future variants: DynamicPU, DynamicFaceted, ...
+-- Future variants: DynamicFaceted, ...
 
 -- Helper to get the current memory view for a level
 getMem :: MultiMemory -> Level -> Memory
@@ -263,104 +301,118 @@ getDependents y infl =
 
 -- SMALL-STEP SEMANTICS OF COMMANDS
 
+-- Top-level dispatch. Each command constructor delegates to a per-rule
+-- helper. Helpers read the record fields they need (via RecordWildCards)
+-- and return the updated configuration with record-update syntax. The
+-- structure mirrors proud-enchanting-mountain.md Part VII: every M-Foo
+-- rule corresponds 1:1 to a stepFoo function below.
 step :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Configuration
-step _ _ _ (Skip, mm, labs, pcs, i, o, s, infl) = (Stop, mm, labs, pcs, i, o, s, infl)
-step mode lat _ (Assign x e, mm, labs, pcs, i, o, s, infl) =
-  let pc = getPCLevel pcs
-      pc_vars = getPCVars pcs
-      bottom = head (latticeLevels lat)
-      l_e = getExprLevel e labs bottom
-      l_target = pc \/ l_e
-      v = exprEval e (getMem mm l_target)
-      cur_lab = labs x
-      monitorOn = mode == DynamicNSU
-   in if monitorOn && not (pc <= cur_lab)
-        then
-          error $
-            "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at assignment to "
-              ++ x
-              ++ ". Current label of "
-              ++ x
-              ++ " is "
-              ++ show cur_lab
-              ++ " but PC is "
-              ++ show pc
-              ++ "; "
-              ++ show pc
-              ++ " does not flow to "
-              ++ show cur_lab
-              ++ "."
-        else
-          let new_mm = updateMultiMemory lat mm x v l_target
-              new_labs y = if y == x then l_target else labs y
-              -- Decide whether the new x is independent of the old x. The
-              -- new x carries information from the old x exactly when some
-              -- variable on which it depends (transitively) is x itself —
-              -- e.g. `x := x + 1`, or `x := y` after `y := x`. In that
-              -- case the new x is in the same information stream as the
-              -- old x, so anything in another variable's deps that was
-              -- copied from old x is still relevant and must be kept.
-              -- If instead the new x is truly fresh (`x := 5`, `x := y`
-              -- where y doesn't transitively depend on x), variables that
-              -- hold *historical* x-data are no longer connected to the
-              -- variable named x; drop x from their dependency sets so a
-              -- later `erase x` doesn't sweep them up.
-              pre_closure = inflClosure (varsExpr e) infl
-              new_depends_on_old = Set.member x pre_closure
-              cleaned =
-                if new_depends_on_old
-                  then infl
-                  else Map.map (Set.delete x) infl
-              -- Eager transitive closure of e's variables: keeps dependency
-              -- chains intact across reassignments (so e.g. inside a
-              -- function body `t := a; t := t + 1` preserves t's
-              -- dependency on a — and through a, on the caller's args —
-              -- instead of collapsing infl[t] to {t}).
-              deps_closure = inflClosure (varsExpr e) cleaned
-              new_infl = Map.insert x (Set.union deps_closure pc_vars) cleaned
-           in (Stop, new_mm, new_labs, pcs, i, o, s, new_infl)
-step mode lat fns (Seq c1 c2, mm, labs, pcs, i, o, s, infl) =
-  case c1 of
-    Halt -> (Halt, mm, labs, pcs, i, o, s, infl)
-    _ ->
-      let (c1', mm', labs', pcs', i', o', s', infl') = step mode lat fns (c1, mm, labs, pcs, i, o, s, infl)
-       in case c1' of
-            Stop -> (c2, mm', labs', pcs', i', o', s', infl')
-            Halt -> (Halt, mm', labs', pcs', i', o', s', infl')
-            _ -> (Seq c1' c2, mm', labs', pcs', i', o', s', infl')
-step _ lat _ (If e c1 c2, mm, labs, pcs, i, o, s, infl) =
-  let pc = getPCLevel pcs
-      pc_vars = getPCVars pcs
-      bottom = head (latticeLevels lat)
-      l_e = getExprLevel e labs bottom
-      new_pc = pc \/ l_e
-      new_pc_vars = Set.union pc_vars (varsExpr e)
-      m_new_pc = getMem mm new_pc
-   in case exprEval e m_new_pc of
-        0 -> (Seq c2 ResetPC, mm, labs, (new_pc, new_pc_vars) : pcs, i, o, s, infl)
-        _ -> (Seq c1 ResetPC, mm, labs, (new_pc, new_pc_vars) : pcs, i, o, s, infl)
--- ResetPC pops the PC stack
-step _ _ _ (ResetPC, mm, labs, (_ : pcs), i, o, s, infl) = (Stop, mm, labs, pcs, i, o, s, infl)
-step _ _ _ (ResetPC, _, _, [], _, _, _, _) = error "PC stack underflow"
+step mode lat fns cfg = case cfgCmd cfg of
+  Skip            -> cfg {cfgCmd = Stop}
+  Halt            -> cfg
+  Stop            -> error "impossible case"
+  ResetPC         -> stepResetPC cfg
+  While e c       -> cfg {cfgCmd = If e (Seq c (While e c)) Skip}
+  If e c1 c2      -> stepIf mode lat cfg e c1 c2
+  Seq c1 c2       -> stepSeq mode lat fns cfg c1 c2
+  Assign x e      -> stepAssign mode lat cfg x e
+  Input ch x      -> stepInput mode lat cfg ch x
+  Output ch e     -> stepOutput mode lat cfg ch e
+  Erase l x       -> stepErase mode lat cfg l x
+  Call x fn args  -> stepCall lat fns cfg x fn args
+  Return          -> stepReturn mode lat cfg
+
+------------------------------------------------------------------
+-- Per-rule helpers
+------------------------------------------------------------------
+
+-- Pop the top PC frame on branch/loop exit.
+stepResetPC :: Configuration -> Configuration
+stepResetPC cfg = case cfgPCs cfg of
+  (_ : pcs) -> cfg {cfgCmd = Stop, cfgPCs = pcs}
+  []        -> error "PC stack underflow"
+
 -- TODO (PC stack growth): desugaring While into If with a recursive While in
--- the then-branch means each iteration's If pushes a new PC context BEFORE the
--- previous iteration's ResetPC can fire — the outer ResetPC sits past the
--- recursive While in `Seq (Seq c (While e c)) ResetPC`. The stack therefore
--- grows by one frame per iteration during execution and only unwinds when the
--- loop finally terminates, costing O(iterations) memory in the configuration
--- (PC stack and the residual Cmd term). Correctness is unaffected — every push
--- is matched by a ResetPC at termination, and getPCLevel always returns the
--- correct (pc ⊔ l_e) since every pushed entry has the same label — but a long
--- loop will hold a linear-sized stack. A direct While rule that reuses one PC
--- frame per iteration would fix this; not worth the refactor today.
-step mode lat _ (While e c, mm, labs, pcs, i, o, s, infl) =
-  (If e (Seq c (While e c)) Skip, mm, labs, pcs, i, o, s, infl)
-step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
-  let pc = getPCLevel pcs
-      pc_vars = getPCVars pcs
-      l_target = ch \/ pc
-      monitorOn = mode == DynamicNSU
-   in if monitorOn && not (pc <= ch)
+-- the then-branch means each iteration's If pushes a new PC context BEFORE
+-- the previous iteration's ResetPC can fire — the outer ResetPC sits past
+-- the recursive While. The stack therefore grows by one frame per iteration
+-- during execution and only unwinds when the loop finally terminates,
+-- costing O(iterations) memory. Correctness is unaffected; a direct While
+-- rule that reuses one PC frame per iteration would fix this.
+stepSeq :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Cmd -> Cmd -> Configuration
+stepSeq mode lat fns cfg c1 c2 = case c1 of
+  Halt -> cfg {cfgCmd = Halt}
+  _ ->
+    let cfg' = step mode lat fns (cfg {cfgCmd = c1})
+     in case cfgCmd cfg' of
+          Stop -> cfg' {cfgCmd = c2}
+          Halt -> cfg' {cfgCmd = Halt}
+          c1'  -> cfg' {cfgCmd = Seq c1' c2}
+
+-- M-If: push pc ⊔ ℓ_e onto the PC stack, choose branch via memory at the
+-- raised view. Under DynamicPU the deferred PU check fires here: if any
+-- variable read by `e` is in P, abort.
+stepIf :: ExecMode -> SecurityLattice -> Configuration -> Expr -> Cmd -> Cmd -> Configuration
+stepIf mode lat cfg@Configuration {..} e c1 c2 =
+  case puBranchViolation mode (varsExpr e) cfgPartials of
+    Left msg -> error msg
+    Right () ->
+      let pc       = getPCLevel cfgPCs
+          pcVars   = getPCVars cfgPCs
+          bottom   = head (latticeLevels lat)
+          l_e      = getExprLevel e cfgLabs bottom
+          newPc    = pc \/ l_e
+          newPcVrs = Set.union pcVars (varsExpr e)
+          taken    = exprEval e (getMem cfgMem newPc) /= 0
+          next     = if taken then Seq c1 ResetPC else Seq c2 ResetPC
+       in cfg {cfgCmd = next, cfgPCs = (newPc, newPcVrs) : cfgPCs}
+
+-- M-Assign: NSU check `pc ⊑ Γ(x)`, then write at level pc ⊔ ℓ_e and update
+-- labels and influences. The conditional cleanup keeps x in dependency sets
+-- iff the new value transitively depends on the old x (see comment block).
+stepAssign :: ExecMode -> SecurityLattice -> Configuration -> VarName -> Expr -> Configuration
+stepAssign mode lat cfg@Configuration {..} x e =
+  let pc       = getPCLevel cfgPCs
+      pcVars   = getPCVars cfgPCs
+      bottom   = head (latticeLevels lat)
+      l_e      = getExprLevel e cfgLabs bottom
+      l_target = pc \/ l_e
+      v        = exprEval e (getMem cfgMem l_target)
+      curLab   = cfgLabs x
+      carriers = Set.union (varsExpr e) pcVars
+   in case applyNsu mode pc curLab x carriers cfgPartials "assignment" of
+        Left msg -> error msg
+        Right newP ->
+          let newMem    = updateMultiMemory lat cfgMem x v l_target
+              newLabs y = if y == x then l_target else cfgLabs y
+              -- Drop x from other variables' deps only when the new x is
+              -- independent of the old x (i.e. x ∉ closure of fv(e)). For
+              -- a reflexive update like `x := x + 1`, x is in the closure,
+              -- so we keep the old links.
+              preClosure       = inflClosure (varsExpr e) cfgInfl
+              newDependsOnOld  = Set.member x preClosure
+              cleaned          =
+                if newDependsOnOld
+                  then cfgInfl
+                  else Map.map (Set.delete x) cfgInfl
+              -- Eager closure: keep dependency chains intact across
+              -- intermediate reassignments.
+              depsClosure = inflClosure (varsExpr e) cleaned
+              newInfl     = Map.insert x (Set.union depsClosure pcVars) cleaned
+           in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
+
+-- M-Input: side-channel check `pc ⊑ ch`, then NSU check `pc ⊑ Γ(x)`. New
+-- x is taken from the head of the input tape. The new x is independent of
+-- the old x unless we're inside a branch whose condition mentions x.
+stepInput :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
+stepInput mode lat cfg@Configuration {..} ch x =
+  let pc        = getPCLevel cfgPCs
+      pcVars    = getPCVars cfgPCs
+      l_target  = ch \/ pc
+      monitorOn = mode == DynamicNSU || mode == DynamicPU
+   in -- The side-channel check is a flow check on the channel itself, not
+      -- an NSU check; PU does NOT relax it.
+      if monitorOn && not (pc <= ch)
         then
           error $
             "Dynamic Monitor Exception: side-channel violation at input from channel "
@@ -370,233 +422,269 @@ step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
               ++ ") does not flow to channel "
               ++ show ch
               ++ "."
-        else
-          if monitorOn && not (pc <= labs x)
-            then
+        else case applyNsu mode pc (cfgLabs x) x pcVars cfgPartials "input" of
+          Left msg -> error msg
+          Right newP -> case cfgInput of
+            [] ->
               error $
-                "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at input to "
+                "Runtime error: input tape exhausted at input to "
                   ++ x
-                  ++ ". PC ("
-                  ++ show pc
-                  ++ ") is not <= Current Label ("
-                  ++ show (labs x)
-                  ++ ")."
-            else case i of
-              [] ->
-                error $
-                  "Runtime error: input tape exhausted at input to "
-                    ++ x
-                    ++ " on channel "
-                    ++ show ch
-                    ++ "." -- TODO REVISE
-              (v : vs) ->
-                let new_mm = updateMultiMemory lat mm x v l_target
-                    new_labs y = if y == x then l_target else labs y
-                    -- Input's new value comes from the external tape, so it
-                    -- is independent of the old x in every case EXCEPT when
-                    -- the input itself is conditional on x — i.e. we're
-                    -- inside `if x then input(...) else …`. In that case x
-                    -- is in pc_vars and the new x's existence carries info
-                    -- about old x via implicit flow, so keep x in other
-                    -- variables' dependency sets. Otherwise clean.
-                    new_depends_on_old = Set.member x pc_vars
-                    cleaned =
-                      if new_depends_on_old
-                        then infl
-                        else Map.map (Set.delete x) infl
-                    new_infl = Map.insert x pc_vars cleaned
-                 in (Stop, new_mm, new_labs, pcs, vs, o, s, new_infl)
-step mode lat _ (Output ch e, mm, labs, pcs, i, o, s, infl) =
-  -- Note on the memory view: Assign / Return / If read at m_(pc ⊔ l_e),
-  -- but Output reads at m_ch instead. That's correct because the flow
-  -- check below requires (l_e ⊔ pc) ⊑ ch, i.e. ch dominates the target
-  -- view, and a higher view contains at least as much information as a
-  -- lower one. If the check fails we error out before consuming v, so
-  -- the read is never observable in the failing case. TODO REWRITE
-  let m_ch = getMem mm ch
-      v = exprEval e m_ch
-      bottom = head (latticeLevels lat)
-      l_e = getExprLevel e labs bottom
-      pc = getPCLevel pcs
-      monitorOn = mode == DynamicNSU
+                  ++ " on channel "
+                  ++ show ch
+                  ++ "."
+            (v : vs) ->
+              let newMem    = updateMultiMemory lat cfgMem x v l_target
+                  newLabs y = if y == x then l_target else cfgLabs y
+                  newDependsOnOld = Set.member x pcVars
+                  cleaned   =
+                    if newDependsOnOld
+                      then cfgInfl
+                      else Map.map (Set.delete x) cfgInfl
+                  newInfl   = Map.insert x pcVars cleaned
+               in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInput = vs, cfgInfl = newInfl, cfgPartials = newP}
+
+-- M-Output: flow check (ℓ_e ⊔ pc) ⊑ ch. The memory view chosen is M#ch
+-- rather than M#(pc ⊔ ℓ_e); legal because ch dominates the target view
+-- when the flow check passes, and the read never fires when it fails.
+stepOutput :: ExecMode -> SecurityLattice -> Configuration -> Level -> Expr -> Configuration
+stepOutput mode lat cfg@Configuration {..} ch e =
+  let v       = exprEval e (getMem cfgMem ch)
+      bottom  = head (latticeLevels lat)
+      l_e     = getExprLevel e cfgLabs bottom
+      pc      = getPCLevel cfgPCs
+      monitorOn = mode == DynamicNSU || mode == DynamicPU
    in if monitorOn && not ((l_e \/ pc) <= ch)
         then
           error $
             "Dynamic Monitor Exception: information flow violation at output to channel "
               ++ show ch
-              ++ ". Expression label ("
+              ++ ". (ℓ_e="
               ++ show l_e
-              ++ ") joined with PC ("
+              ++ ") ⊔ (PC="
               ++ show pc
-              ++ ") is not <= channel label "
+              ++ ") ⋢ "
               ++ show ch
               ++ "."
-        else (Stop, mm, labs, pcs, i, o ++ [(ch, v)], s, infl)
-step mode lat _ (Erase l_cmd x, mm, labs, pcs, i, o, s, infl) =
-  let pc = getPCLevel pcs
-      l_var = labs x
-      monitorOn = mode == DynamicNSU
-   in if monitorOn && not (pc <= l_var)
+        else cfg {cfgCmd = Stop, cfgOutput = cfgOutput ++ [(ch, v)]}
+
+-- M-Erase: NSU check `pc ⊑ Γ(x)`, then for every dependent v of x (forward
+-- closure through the influence map) zero v at views ⋢ (ℓ_cmd ⊔ Γ(v) ⊔ pc)
+-- and raise its label. pc_vars are *unioned* into deps, not assigned, so a
+-- later erase still finds the same dependents.
+--
+-- Under DynamicPU the NSU check is deferred: if `pc ⋢ Γ(x)`, the erase is
+-- allowed but every dependent is added to P (its post-erase memory state at
+-- low views reflects an upgrade decision). P also propagates from x itself
+-- (if x was already P-marked) to its dependents.
+stepErase :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
+stepErase mode lat cfg@Configuration {..} l_cmd x =
+  let pc      = getPCLevel cfgPCs
+      l_var   = cfgLabs x
+      nsuFail = not (pc <= l_var)
+   in if mode == DynamicNSU && nsuFail
         then
           error $
             "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at erase of "
               ++ x
               ++ ". PC ("
               ++ show pc
-              ++ ") is not <= Current Label ("
+              ++ ") ⋢ Γ("
+              ++ x
+              ++ ") = "
               ++ show l_var
-              ++ "); a conditional erase under a higher PC would "
-              ++ "be observable at lower levels."
+              ++ "; a conditional erase under a higher PC would be observable at lower levels."
         else
-          let pc_vars = getPCVars pcs
-              deps = getDependents x infl
-              (new_mm, new_labs) =
+          let pcVars = getPCVars cfgPCs
+              deps   = getDependents x cfgInfl
+              (newMem, newLabs) =
                 Set.foldl
                   ( \(m, l) v ->
                       let l_target_v = l_cmd \/ l v \/ pc
                        in (eraseMultiMemory lat m v l_target_v, \z -> if z == v then l_target_v else l z)
                   )
-                  (mm, labs)
+                  (cfgMem, cfgLabs)
                   deps
-              -- Union pc_vars into each erased variable's existing
-              -- dependency set, rather than replacing it. The erased
-              -- variables are still in the same information stream as x —
-              -- e.g. after `a := x; x := x+1; erase(_, x)`, both x and a
-              -- get erased, but `a` is still derived from x and a later
-              -- `erase(_, x)` must again pick `a` up as a dependent. The
-              -- old `Map.insert v pc_vars` clobbered that link.
-              new_infl =
+              newInfl =
                 Set.foldl
-                  (\acc v -> Map.insertWith Set.union v pc_vars acc)
-                  infl
+                  (\acc v -> Map.insertWith Set.union v pcVars acc)
+                  cfgInfl
                   deps
-           in (Stop, new_mm, new_labs, pcs, i, o, s, new_infl)
-step mode lat fns (Call x fName args, mm, labs, pcs, i, o, s, infl) =
+              -- Under PU only: propagate P to every dependent when the
+              -- erase itself was upgraded (nsuFail) or when x carried P.
+              propagateP = nsuFail || Set.member x cfgPartials
+              newP =
+                if mode == DynamicPU && propagateP
+                  then Set.union cfgPartials deps
+                  else cfgPartials
+           in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
+
+-- M-Call: build the callee's memory and labels, save the caller frame
+-- (including the maps needed to translate callee-side names back at
+-- Return), and push the body. Non-parameter locals start at the caller's
+-- pc rather than ⊥, matching PLAS'09 [U-REF].
+stepCall :: SecurityLattice -> [Function] -> Configuration -> VarName -> String -> [Expr] -> Configuration
+stepCall lat fns cfg@Configuration {..} x fName args =
   case filter (\f -> funcName f == fName) fns of
     [] -> error $ "Function " ++ fName ++ " not found"
     (f : _) ->
-      let pc = getPCLevel pcs
-          pc_vars = getPCVars pcs
-          bottom = head (latticeLevels lat)
-          l_args = map (\e -> getExprLevel e labs bottom) args -- Arguments levels
-          arg_targets = map (pc \/) l_args -- Raises each arg level to at least pc.
-          vals = zipWith (\e l_t -> exprEval e (getMem mm l_t)) args arg_targets -- Evaluate each argument
-          empty_mm = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat] -- Empty_memory for the function
-          new_mm =
+      let pc       = getPCLevel cfgPCs
+          pcVars   = getPCVars cfgPCs
+          bottom   = head (latticeLevels lat)
+          l_args   = map (\e -> getExprLevel e cfgLabs bottom) args
+          argTgts  = map (pc \/) l_args
+          vals     = zipWith (\e l_t -> exprEval e (getMem cfgMem l_t)) args argTgts
+          emptyMem = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
+          newMem =
             foldl
-              ( \acc (var, val, l_t) ->
-                  updateMultiMemory lat acc var val l_t
-              )
-              empty_mm
-              (zip3 (funcArgs f) vals arg_targets) -- Update the memory with the function arguments value (vals)
-
-          -- Callee non-arg locals start at the caller's pc rather than
-          -- bottom. This mirrors PLAS '09 [U-REF]: a freshly allocated
-          -- cell takes the current pc as its label, so the first
-          -- assignment in the body satisfies the NSU check `pc ⊑ label`.
-          -- Without this, any function body containing an assignment is
-          -- un-callable under a non-bottom pc.
-          new_labs y = case elemIndex y (funcArgs f) of
-            Just idx -> arg_targets !! idx
+              (\acc (var, val, l_t) -> updateMultiMemory lat acc var val l_t)
+              emptyMem
+              (zip3 (funcArgs f) vals argTgts)
+          newLabs y = case elemIndex y (funcArgs f) of
+            Just idx -> argTgts !! idx
             Nothing -> pc
-
-          -- Callee_infl starts empty. The caller-side
-          -- variables that contributed to each parameter are recorded
-          -- separately in arg_to_vars and substituted back at Return.
-          -- This avoids the name-shadowing pitfall of injecting caller
-          -- variable names directly into the callee's infl map.
-          new_infl = Map.empty
-
-          callee_intro = Set.fromList (funcArgs f) `Set.union` varsCmd (funcBody f)
-          arg_to_vars =
+          calleeIntro = Set.fromList (funcArgs f) `Set.union` varsCmd (funcBody f)
+          argToVars =
             Map.fromList
-              [ (p, Set.union (varsExpr e) pc_vars)
-                | (p, e) <- zip (funcArgs f) args
-              ]
+              [(p, Set.union (varsExpr e) pcVars) | (p, e) <- zip (funcArgs f) args]
+          frame = (x, cfgMem, cfgLabs, cfgPCs, funcReturn f, cfgInfl, calleeIntro, argToVars)
+       in cfg
+            { cfgCmd   = Seq (funcBody f) Return
+            , cfgMem   = newMem
+            , cfgLabs  = newLabs
+            , cfgPCs   = [(pc, pcVars)]
+            , cfgStack = frame : cfgStack
+            , cfgInfl  = Map.empty
+            }
 
-          frame = (x, mm, labs, pcs, funcReturn f, infl, callee_intro, arg_to_vars)
-       in (Seq (funcBody f) Return, new_mm, new_labs, [(pc, pc_vars)], i, o, frame : s, new_infl)
-step mode lat _ (Return, mm, labs, pcs, i, o, (x, caller_mm, caller_labs, caller_pcs, ret_expr, caller_infl, callee_intro, arg_to_vars) : s, infl) =
-  let pc = getPCLevel pcs
-      pc_vars = getPCVars pcs
-      caller_pc = getPCLevel caller_pcs
-      caller_pc_vars = getPCVars caller_pcs
-      bottom = head (latticeLevels lat)
-      l_ret = getExprLevel ret_expr labs bottom
-      l_target = l_ret \/ pc \/ caller_pc
-      v = exprEval ret_expr (getMem mm l_target)
-      monitorOn = mode == DynamicNSU
-   in if monitorOn && not (caller_pc <= caller_labs x)
-        then
-          error $
-            "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at function return to "
-              ++ x
-              ++ ". Caller PC ("
-              ++ show caller_pc
-              ++ ") is not <= Current Label ("
-              ++ show (caller_labs x)
-              ++ ")."
-        else
-          let final_mm = updateMultiMemory lat caller_mm x v l_target
-              final_labs y = if y == x then l_target else caller_labs y
+-- M-Return: NSU check at the receiver, then write the return value into
+-- the caller's `x`. Resolves the callee-internal influence closure back
+-- into caller-side names via `argToVars` (see Approach B comment).
+--
+-- Under DynamicPU the NSU check is deferred via applyNsu, using
+-- `resolved ∪ callerPcVars` as the carriers of P. Callee-introduced names
+-- in P are dropped at the boundary — they have no meaning in the caller's
+-- namespace.
+stepReturn :: ExecMode -> SecurityLattice -> Configuration -> Configuration
+stepReturn mode lat cfg@Configuration {..} = case cfgStack of
+  [] -> error "Return with empty call stack"
+  (x, callerMem, callerLabs, callerPCs, retExpr, callerInfl, calleeIntro, argToVars) : restStack ->
+    let pc            = getPCLevel cfgPCs
+        pcVars        = getPCVars cfgPCs
+        callerPC      = getPCLevel callerPCs
+        callerPcVars  = getPCVars callerPCs
+        bottom        = head (latticeLevels lat)
+        l_ret         = getExprLevel retExpr cfgLabs bottom
+        l_target      = l_ret \/ pc \/ callerPC
+        v             = exprEval retExpr (getMem cfgMem l_target)
+        retSeed       = Set.union (varsExpr retExpr) pcVars
+        calleeTotal   = inflClosure retSeed cfgInfl
+        resolved =
+          Set.unions
+            [ case Map.lookup n argToVars of
+                Just callerVars -> callerVars
+                Nothing
+                  | Set.member n calleeIntro -> Set.empty
+                  | otherwise -> Set.singleton n
+            | n <- Set.toList calleeTotal
+            ]
+        -- Drop callee-introduced P entries: they have no meaning in the
+        -- caller's namespace. Caller-side P entries survive unchanged.
+        cleanedP = Set.difference cfgPartials calleeIntro
+        carriers = Set.union resolved callerPcVars
+     in case applyNsu mode callerPC (callerLabs x) x carriers cleanedP "function return" of
+          Left msg -> error msg
+          Right newP ->
+            let finalMem    = updateMultiMemory lat callerMem x v l_target
+                finalLabs y = if y == x then l_target else callerLabs y
+                newXDeps    = Set.union resolved callerPcVars
+                newDependsOnOld = Set.member x newXDeps
+                cleanedCaller =
+                  if newDependsOnOld
+                    then callerInfl
+                    else Map.map (Set.delete x) callerInfl
+                newCallerInfl = Map.insert x newXDeps cleanedCaller
+             in cfg
+                  { cfgCmd      = Stop
+                  , cfgMem      = finalMem
+                  , cfgLabs     = finalLabs
+                  , cfgPCs      = callerPCs
+                  , cfgStack    = restStack
+                  , cfgInfl     = newCallerInfl
+                  , cfgPartials = newP
+                  }
 
-              -- Approach B: take the forward transitive closure of the
-              -- return-expression's variables (together with the callee's
-              -- accumulated pc_vars) through the callee's influence map.
-              -- Eager closure on Assign guarantees that this single closure
-              -- captures every callee-local that the return value depends on.
-              ret_seed = Set.union (varsExpr ret_expr) pc_vars
-              callee_total = inflClosure ret_seed infl
+-- Shared error formatter for NSU violations.
+nsuMsg :: String -> VarName -> Level -> Level -> String
+nsuMsg site x pc curLab =
+  "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at "
+    ++ site
+    ++ " to "
+    ++ x
+    ++ ". PC ("
+    ++ show pc
+    ++ ") ⋢ Γ("
+    ++ x
+    ++ ") = "
+    ++ show curLab
+    ++ "."
 
-              -- Resolve each name in the closure back into caller-side names:
-              --   * if it's a parameter, substitute the caller variables in
-              --     the corresponding argument expression (plus the caller's
-              --     pc_vars at the call site, already merged in at Call);
-              --   * else if it's a callee-introduced name, drop it (it has
-              --     no meaning in the caller's namespace);
-              --   * else keep it — it can only have arrived in the callee
-              --     infl via caller-side pc_vars (e.g. an enclosing `if`).
-              resolved =
-                Set.unions
-                  [ case Map.lookup n arg_to_vars of
-                      Just caller_vars -> caller_vars
-                      Nothing
-                        | Set.member n callee_intro -> Set.empty
-                        | otherwise -> Set.singleton n
-                    | n <- Set.toList callee_total
-                  ]
+-- Decide an NSU-style write site (Assign / Input / Return). Encapsulates the
+-- entire NSU-vs-PU policy difference for single-target writes:
+--   * DynamicNSU + `pc ⋢ Γ(x)` → Left (abort message).
+--   * DynamicPU + same       → Right (P ∪ {x}): allow, mark x as partial-leak.
+--   * Otherwise               → Right (P updated by propagation from rhsCarriers).
+-- `rhsCarriers` is the set of variables that fed the value about to be
+-- written to x (e.g. fv(e) ∪ pc_vars). When any of them is currently in P,
+-- x inherits the P flag; on a clean write under a flowing PC, x is removed
+-- from P (its old upgraded value is gone).
+applyNsu
+  :: ExecMode
+  -> Level
+  -> Level
+  -> VarName
+  -> Set.Set VarName
+  -> Partials
+  -> String
+  -> Either String Partials
+applyNsu mode pc curLab x rhsCarriers p site =
+  let nsuFail   = not (pc <= curLab)
+      pFromRhs  = any (`Set.member` p) (Set.toList rhsCarriers)
+      addToP    = nsuFail || pFromRhs
+      p'        = if addToP then Set.insert x p else Set.delete x p
+   in if mode == DynamicNSU && nsuFail
+        then Left (nsuMsg site x pc curLab)
+        else Right p'
 
-              -- Same conditional cleanup as Assign: only drop x from
-              -- existing caller-side dependency sets if the new x (the
-              -- return value) is independent of the old x. The new x's
-              -- deps are `resolved ∪ caller_pc_vars`, so the new x depends
-              -- on the old x exactly when x appears in either — e.g.
-              -- `x := call f(x)` (x reaches `resolved` through the args)
-              -- or `if x then x := call f(0)` (x in caller_pc_vars via the
-              -- enclosing branch).
-              new_x_deps = Set.union resolved caller_pc_vars
-              new_depends_on_old = Set.member x new_x_deps
-              cleaned_caller_infl =
-                if new_depends_on_old
-                  then caller_infl
-                  else Map.map (Set.delete x) caller_infl
-              new_caller_infl = Map.insert x new_x_deps cleaned_caller_infl
-           in (Stop, final_mm, final_labs, caller_pcs, i, o, s, new_caller_infl)
-step _ _ _ (Halt, mm, labs, pcs, i, o, s, infl) = (Halt, mm, labs, pcs, i, o, s, infl)
-step _ _ _ (Stop, _, _, _, _, _, _, _) = error "impossible case"
+-- Deferred PU check at branch conditions. Returns Left msg if PU must abort
+-- because some variable read by the branch expression is P-marked; Right ()
+-- otherwise. Modes other than DynamicPU never abort here.
+puBranchViolation :: ExecMode -> Set.Set VarName -> Partials -> Either String ()
+puBranchViolation DynamicPU eVars p
+  | not (Set.null bad) = Left msg
+  | otherwise = Right ()
+  where
+    bad = Set.intersection eVars p
+    msg =
+      "Dynamic Monitor Exception: Permissive-Upgrade violation at branch: "
+        ++ "variables { "
+        ++ intercalate ", " (Set.toList bad)
+        ++ " } are partially-leaked (their values reflect a write made under "
+        ++ "a non-flowing PC); branching on them would observe that decision."
+puBranchViolation _ _ _ = Right ()
 
 -- INFRASTRUCTURE
 
-data Result = Finished MultiMemory Labels [(Level, Value)] Influences | OutOfFuel
+data Result = Finished MultiMemory Labels [(Level, Value)] Influences Partials | OutOfFuel
 
 evalF :: Integer -> ExecMode -> SecurityLattice -> [Function] -> Configuration -> Result
 evalF 0 _ _ _ _ = OutOfFuel
-evalF n mode lat fns config =
-  let config'@(c', mm', labs', pcs', i', o', s', infl') = step mode lat fns config
-   in case c' of
-        Halt -> Finished mm' labs' o' infl' -- Halt terminates regardless of stack depth
-        Stop | null s' -> Finished mm' labs' o' infl'
-        _ -> evalF (n - 1) mode lat fns config'
+evalF n mode lat fns cfg =
+  let cfg' = step mode lat fns cfg
+      done = Finished (cfgMem cfg') (cfgLabs cfg') (cfgOutput cfg') (cfgInfl cfg') (cfgPartials cfg')
+   in case cfgCmd cfg' of
+        Halt                        -> done -- Halt terminates regardless of stack depth
+        Stop | null (cfgStack cfg') -> done
+        _                           -> evalF (n - 1) mode lat fns cfg'
 
 -- print variables in vars on screen with their security level
 printMultiMem :: MultiMemory -> Labels -> SecurityLattice -> [VarName] -> IO ()
@@ -612,8 +700,8 @@ printMultiMem mm labs lat vars = do
     )
     (latticeLevels lat)
 
-printSecurityReport :: SecurityLattice -> [VarName] -> MultiMemory -> Labels -> [(Level, Value)] -> Influences -> IO ()
-printSecurityReport lat vars mm labs outputs infl = do
+printSecurityReport :: SecurityLattice -> [VarName] -> MultiMemory -> Labels -> [(Level, Value)] -> Influences -> Partials -> IO ()
+printSecurityReport lat vars mm labs outputs infl partials = do
   let levels = latticeLevels lat
       obsW = maximum (1 : map (length . show) levels)
       nameW = maximum (4 : map length vars)
@@ -667,14 +755,22 @@ printSecurityReport lat vars mm labs outputs infl = do
     )
     vars
   putStrLn ""
+  putStrLn $ bold "  Partials (PU-marked)"
+  let pStr =
+        if Set.null partials
+          then "\8709"
+          else "{ " ++ intercalate ", " (Set.toList partials) ++ " }"
+  putStrLn $ "    " ++ pStr
+  putStrLn ""
   where
     padR n s = s ++ replicate (max 0 (n - length s)) ' '
     padL n s = replicate (max 0 (n - length s)) ' ' ++ s
 
 -- run program with fuel n and print the variable values and output
-runF n showReport mode lat fns vars (c, mm, labs, pcs, i, o, s, infl) =
-  case evalF n mode lat fns (c, mm, labs, pcs, i, o, s, infl) of
+runF :: Integer -> Bool -> ExecMode -> SecurityLattice -> [Function] -> [VarName] -> Configuration -> IO ()
+runF n showReport mode lat fns vars cfg =
+  case evalF n mode lat fns cfg of
     OutOfFuel -> print "OutOfFuel"
-    Finished mm' labs' o' infl' -> do
+    Finished mm' labs' o' infl' p' -> do
       putStrLn $ bold "Output: " ++ show (map snd o')
-      when showReport $ printSecurityReport lat vars mm' labs' o' infl'
+      when showReport $ printSecurityReport lat vars mm' labs' o' infl' p'

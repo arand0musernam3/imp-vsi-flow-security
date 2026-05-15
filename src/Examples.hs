@@ -1,7 +1,5 @@
 module Examples where
 
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 import Imp
 import Parser (parseImp)
 
@@ -16,20 +14,9 @@ mZ = \_ -> 0
 runModeWithInput :: Bool -> ExecMode -> Program -> [Value] -> IO ()
 runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
   putStrLn $ "AST: " ++ show prog
-  let vars = getVars p
-  let bottom = head (latticeLevels lat)
-
-  -- All variables start at the lattice bottom; input(ℓ, x) is the only
-  -- way to inject a non-⊥ label.
-  let initialLabels = \_ -> bottom
-
-  -- Initial MultiMemory (empty for all levels)
-  let initialMultiMemory = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
-
-  let initialPC = (bottom, Set.empty)
-  let initialInfluences = Map.empty
-
-  let execute = runF 100 showReport mode lat fns vars (p, initialMultiMemory, initialLabels, [initialPC], inputs, [], [], initialInfluences)
+  let vars    = getVars p
+      cfg     = initialConfig lat p inputs
+      execute = runF 100 showReport mode lat fns vars cfg
 
   case mode of
     Untyped -> do
@@ -37,6 +24,9 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
       execute
     DynamicNSU -> do
       putStrLn (boldYellow "--- Mode: DYNAMIC MONITOR (NSU) ---")
+      execute
+    DynamicPU -> do
+      putStrLn (boldYellow "--- Mode: DYNAMIC MONITOR (PU) ---")
       execute
 
 runStringModeWithInput :: Bool -> ExecMode -> String -> [Value] -> IO ()
