@@ -338,18 +338,6 @@ step mode lat _ (Input ch x, mm, labs, pcs, i, o, s, infl) =
        then error $ "Dynamic Monitor Exception: side-channel violation at input from channel "
                  ++ show ch ++ ". PC (" ++ show pc ++ ") does not flow to channel "
                  ++ show ch ++ "."
-       -- NSU on the *current* label of x, not on the channel. `input` is a
-       -- conditional update from the monitor's point of view: in one execution
-       -- the branch is taken and labs x rises from labs_old → ch ⊔ pc; in the
-       -- alternative execution it stays labs_old. If labs_old ≠ ch ⊔ pc, the
-       -- label change is observable and leaks pc.
-       --
-       -- Concretely: `input(high, x); if x then input(high, y) else skip;
-       --              if y then z := 0 else skip; output(low, z)`
-       -- with x=0,y=0 leaves labs y = ⊥, so `if y` runs at pc=⊥ and the write
-       -- to z is allowed — z observable at low encodes x.
-       -- The (pc ⊑ ch) side-channel check above does NOT catch this case
-       -- because pc=high ⊑ ch=high holds; only the NSU-on-labs-x check fires.
        else if monitorOn && not (pc <= labs x)
        then error $ "Dynamic Monitor Exception: No-Sensitive-Upgrade violation at input to "
                  ++ x ++ ". PC (" ++ show pc ++ ") is not <= Current Label ("
