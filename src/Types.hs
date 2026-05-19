@@ -84,7 +84,7 @@ data TypeRes = WellTyped Environment Influences | TypeError String
 type FuncSummaries = Map.Map (String, [Level], Level) Level
 
 cmdType' :: [Function] -> FuncSummaries -> [VarName] -> Environment -> (Level, Set.Set VarName) -> Influences -> Cmd -> TypeRes
-cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
+cmdType' fns summaries vars env (pc, vars_pc_depends_on) infl cmd = case cmd of
   Skip -> WellTyped env infl
   Assign x e ->
     let l = exprType env e
@@ -101,18 +101,18 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
             then infl
             else Map.map (Set.delete x) infl
         deps_closure = Imp.inflClosure (varsExpr e) cleaned
-        new_infl = Map.insert x (Set.union deps_closure pc_vars) cleaned
+        new_infl = Map.insert x (Set.union deps_closure vars_pc_depends_on) cleaned
      in WellTyped (updateEnv env x l') new_infl
   Seq c1 c2 ->
-    case cmdType' fns summaries vars env (pc, pc_vars) infl c1 of
-      WellTyped env' infl' -> cmdType' fns summaries vars env' (pc, pc_vars) infl' c2
+    case cmdType' fns summaries vars env (pc, vars_pc_depends_on) infl c1 of
+      WellTyped env' infl' -> cmdType' fns summaries vars env' (pc, vars_pc_depends_on) infl' c2
       err -> err
   If e c1 c2 ->
     let l = exprType env e
         pc' = pc \/ l
-        pc_vars' = Set.union pc_vars (varsExpr e)
-     in case cmdType' fns summaries vars env (pc', pc_vars') infl c1 of
-          WellTyped env1' infl1' -> case cmdType' fns summaries vars env (pc', pc_vars') infl c2 of
+        vars_pc_depends_on' = Set.union vars_pc_depends_on (varsExpr e)
+     in case cmdType' fns summaries vars env (pc', vars_pc_depends_on') infl c1 of
+          WellTyped env1' infl1' -> case cmdType' fns summaries vars env (pc', vars_pc_depends_on') infl c2 of
             WellTyped env2' infl2' -> WellTyped (joinEnv env1' env2') (Map.unionWith Set.union infl1' infl2')
             err -> err
           err -> err
@@ -124,10 +124,10 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
     -- bounded by O(height(lattice) × |vars|) iterations.
     let l = exprType env e
         pc' = pc \/ l
-        pc_vars' = Set.union pc_vars (varsExpr e)
+        vars_pc_depends_on' = Set.union vars_pc_depends_on (varsExpr e)
 
         loop env_in infl_in =
-          case cmdType' fns summaries vars env_in (pc', pc_vars') infl_in c of
+          case cmdType' fns summaries vars env_in (pc', vars_pc_depends_on') infl_in c of
             WellTyped env_out infl_out ->
               let env_next = joinEnv env_in env_out
                   infl_next = Map.unionWith Set.union infl_in infl_out
@@ -144,12 +144,12 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
     if not (pc <= ch)
       then TypeError $ "Input failed: pc (" ++ show pc ++ ") does not flow to channel (" ++ show ch ++ ")"
       else
-        let new_depends_on_old = Set.member x pc_vars
+        let new_depends_on_old = Set.member x vars_pc_depends_on
             cleaned =
               if new_depends_on_old
                 then infl
                 else Map.map (Set.delete x) infl
-            new_infl = Map.insert x pc_vars cleaned
+            new_infl = Map.insert x vars_pc_depends_on cleaned
          in WellTyped (updateEnv env x (ch \/ pc)) new_infl
   Output ch e ->
     let l = exprType env e
@@ -167,12 +167,12 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
             )
             env
             deps
-        -- Same fix as the dynamic Erase: union pc_vars into each erased
+        -- Same fix as the dynamic Erase: union vars_pc_depends_on into each erased
         -- variable's existing deps so the dependency chain survives the
         -- erase and a subsequent erase can still re-find the same set.
         new_infl =
           Set.foldl
-            (\acc v -> Map.insertWith Set.union v pc_vars acc)
+            (\acc v -> Map.insertWith Set.union v vars_pc_depends_on acc)
             infl
             deps
      in WellTyped new_env new_infl
@@ -189,7 +189,7 @@ cmdType' fns summaries vars env (pc, pc_vars) infl cmd = case cmd of
                 -- the argument variables within the caller's own infl.
                 let arg_vars = Set.unions (map varsExpr args)
                     arg_closure = Imp.inflClosure arg_vars infl
-                    new_x_deps = Set.union arg_closure pc_vars
+                    new_x_deps = Set.union arg_closure vars_pc_depends_on
                     new_depends_on_old = Set.member x new_x_deps
                     cleaned =
                       if new_depends_on_old
@@ -234,6 +234,7 @@ computeSummaries lat fns = verified
   where
     allLevels = latticeLevels lat
     bot = head allLevels
+    top = last allLevels
 
     argCombos f = combinations (length (funcArgs f))
     combinations 0 = [[]]
@@ -264,7 +265,7 @@ computeSummaries lat fns = verified
                   pcL <- allLevels,
                   let retL = case typeCheckBody current f argL pcL of
                         WellTyped envAfter _ -> exprType envAfter (funcReturn f)
-                        _ -> bot
+                        _ -> top
               ]
        in if next == current then current else iterateAssumed next
 

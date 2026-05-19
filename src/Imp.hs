@@ -146,15 +146,15 @@ type Stack = [StackFrame]
 
 -- The full machine state rewritten by the small-step semantics.
 data Configuration = Configuration
-  { cfgCmd      :: Cmd                -- current command
-  , cfgMem      :: MultiMemory        -- per-level memory views
-  , cfgLabs     :: Labels             -- dynamic label environment Γ
-  , cfgPCs      :: [PCContext]        -- PC stack π
-  , cfgInput    :: [Value]            -- input tape In
-  , cfgOutput   :: [(Level, Value)]   -- output tape Out
-  , cfgStack    :: Stack              -- call stack S
-  , cfgInfl     :: Influences         -- influence map I
-  , cfgPartials :: Partials           -- partial-leak set P
+  { cfgCmd :: Cmd, -- current command
+    cfgMem :: MultiMemory, -- per-level memory views
+    cfgLabs :: Labels, -- dynamic label environment Γ
+    cfgPCs :: [PCContext], -- PC stack π
+    cfgInput :: [Value], -- input tape In
+    cfgOutput :: [(Level, Value)], -- output tape Out
+    cfgStack :: Stack, -- call stack S
+    cfgInfl :: Influences, -- influence map I
+    cfgPartials :: Partials -- partial-leak set P
   }
 
 -- Fresh configuration: every variable at ⊥, every memory view zero, empty P.
@@ -162,15 +162,15 @@ initialConfig :: SecurityLattice -> Cmd -> [Value] -> Configuration
 initialConfig lat c is =
   let bottom = head (latticeLevels lat)
    in Configuration
-        { cfgCmd      = c
-        , cfgMem      = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
-        , cfgLabs     = \_ -> bottom
-        , cfgPCs      = [(bottom, Set.empty)]
-        , cfgInput    = is
-        , cfgOutput   = []
-        , cfgStack    = []
-        , cfgInfl     = Map.empty
-        , cfgPartials = Set.empty
+        { cfgCmd = c,
+          cfgMem = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat],
+          cfgLabs = \_ -> bottom,
+          cfgPCs = [(bottom, Set.empty)],
+          cfgInput = is,
+          cfgOutput = [],
+          cfgStack = [],
+          cfgInfl = Map.empty,
+          cfgPartials = Set.empty
         }
 
 -- Forward transitive closure of `seed` through the influence map: repeatedly
@@ -263,19 +263,19 @@ getDependents y infl =
 -- configuration.
 step :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Configuration
 step mode lat fns cfg = case cfgCmd cfg of
-  Skip            -> cfg {cfgCmd = Stop}
-  Halt            -> cfg
-  Stop            -> error "impossible case"
-  ResetPC         -> stepResetPC cfg
-  While e c       -> cfg {cfgCmd = If e (Seq c (While e c)) Skip}
-  If e c1 c2      -> stepIf mode lat cfg e c1 c2
-  Seq c1 c2       -> stepSeq mode lat fns cfg c1 c2
-  Assign x e      -> stepAssign mode lat cfg x e
-  Input ch x      -> stepInput mode lat cfg ch x
-  Output ch e     -> stepOutput mode lat cfg ch e
-  Erase l x       -> stepErase mode lat cfg l x
-  Call x fn args  -> stepCall lat fns cfg x fn args
-  Return          -> stepReturn mode lat cfg
+  Skip -> cfg {cfgCmd = Stop}
+  Halt -> cfg
+  Stop -> error "impossible case"
+  ResetPC -> stepResetPC cfg
+  While e c -> cfg {cfgCmd = If e (Seq c (While e c)) Skip}
+  If e c1 c2 -> stepIf mode lat cfg e c1 c2
+  Seq c1 c2 -> stepSeq mode lat fns cfg c1 c2
+  Assign x e -> stepAssign mode lat cfg x e
+  Input ch x -> stepInput mode lat cfg ch x
+  Output ch e -> stepOutput mode lat cfg ch e
+  Erase l x -> stepErase mode lat cfg l x
+  Call x fn args -> stepCall lat fns cfg x fn args
+  Return -> stepReturn mode lat cfg
 
 ------------------------------------------------------------------
 -- Per-rule helpers
@@ -285,7 +285,7 @@ step mode lat fns cfg = case cfgCmd cfg of
 stepResetPC :: Configuration -> Configuration
 stepResetPC cfg = case cfgPCs cfg of
   (_ : pcs) -> cfg {cfgCmd = Stop, cfgPCs = pcs}
-  []        -> error "PC stack underflow"
+  [] -> error "PC stack underflow"
 
 -- TODO (PC stack growth): desugaring While into If with a recursive While in
 -- the then-branch means each iteration's If pushes a new PC context BEFORE
@@ -302,7 +302,7 @@ stepSeq mode lat fns cfg c1 c2 = case c1 of
      in case cfgCmd cfg' of
           Stop -> cfg' {cfgCmd = c2}
           Halt -> cfg' {cfgCmd = Halt}
-          c1'  -> cfg' {cfgCmd = Seq c1' c2}
+          c1' -> cfg' {cfgCmd = Seq c1' c2}
 
 -- Under DynamicPU the deferred PU check fires here: if any variable read by
 -- `e` is in P, abort.
@@ -311,54 +311,54 @@ stepIf mode lat cfg@Configuration {..} e c1 c2 =
   case puBranchViolation mode (varsExpr e) cfgPartials of
     Left msg -> error msg
     Right () ->
-      let pc       = getPCLevel cfgPCs
-          pcVars   = getPCVars cfgPCs
-          bottom   = head (latticeLevels lat)
-          l_e      = getExprLevel e cfgLabs bottom
-          newPc    = pc \/ l_e
+      let pc = getPCLevel cfgPCs
+          pcVars = getPCVars cfgPCs
+          bottom = head (latticeLevels lat)
+          l_e = getExprLevel e cfgLabs bottom
+          newPc = pc \/ l_e
           newPcVrs = Set.union pcVars (varsExpr e)
-          taken    = exprEval e (getMem cfgMem newPc) /= 0
-          next     = if taken then Seq c1 ResetPC else Seq c2 ResetPC
+          taken = exprEval e (getMem cfgMem newPc) /= 0
+          next = if taken then Seq c1 ResetPC else Seq c2 ResetPC
        in cfg {cfgCmd = next, cfgPCs = (newPc, newPcVrs) : cfgPCs}
 
 stepAssign :: ExecMode -> SecurityLattice -> Configuration -> VarName -> Expr -> Configuration
 stepAssign mode lat cfg@Configuration {..} x e =
-  let pc       = getPCLevel cfgPCs
-      pcVars   = getPCVars cfgPCs
-      bottom   = head (latticeLevels lat)
-      l_e      = getExprLevel e cfgLabs bottom
+  let pc = getPCLevel cfgPCs
+      pcVars = getPCVars cfgPCs
+      bottom = head (latticeLevels lat)
+      l_e = getExprLevel e cfgLabs bottom
       l_target = pc \/ l_e
-      v        = exprEval e (getMem cfgMem l_target)
-      curLab   = cfgLabs x
+      v = exprEval e (getMem cfgMem l_target)
+      curLab = cfgLabs x
       carriers = Set.union (varsExpr e) pcVars
    in case applyNsu mode pc curLab x carriers cfgPartials "assignment" of
         Left msg -> error msg
         Right newP ->
-          let newMem    = updateMultiMemory lat cfgMem x v l_target
+          let newMem = updateMultiMemory lat cfgMem x v l_target
               newLabs y = if y == x then l_target else cfgLabs y
               -- Only drop x from other variables' deps when the new x is
               -- independent of the old x (x ∉ closure of fv(e)). A reflexive
               -- update like `x := x + 1` keeps x in the closure, so other
               -- variables' references to x must stay.
-              preClosure       = inflClosure (varsExpr e) cfgInfl
-              newDependsOnOld  = Set.member x preClosure
-              cleaned          =
+              preClosure = inflClosure (varsExpr e) cfgInfl
+              newDependsOnOld = Set.member x preClosure
+              cleaned =
                 if newDependsOnOld
                   then cfgInfl
                   else Map.map (Set.delete x) cfgInfl
               -- Eager closure keeps dependency chains intact across
               -- intermediate reassignments.
               depsClosure = inflClosure (varsExpr e) cleaned
-              newInfl     = Map.insert x (Set.union depsClosure pcVars) cleaned
+              newInfl = Map.insert x (Set.union depsClosure pcVars) cleaned
            in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
 
 -- The side-channel check `pc ⊑ ch` is a flow check on the channel itself,
 -- not an NSU check; PU does NOT relax it.
 stepInput :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepInput mode lat cfg@Configuration {..} ch x =
-  let pc        = getPCLevel cfgPCs
-      pcVars    = getPCVars cfgPCs
-      l_target  = ch \/ pc
+  let pc = getPCLevel cfgPCs
+      pcVars = getPCVars cfgPCs
+      l_target = ch \/ pc
       monitorOn = mode == DynamicNSU || mode == DynamicPU
    in if monitorOn && not (pc <= ch)
         then
@@ -381,14 +381,14 @@ stepInput mode lat cfg@Configuration {..} ch x =
                   ++ show ch
                   ++ "."
             (v : vs) ->
-              let newMem    = updateMultiMemory lat cfgMem x v l_target
+              let newMem = updateMultiMemory lat cfgMem x v l_target
                   newLabs y = if y == x then l_target else cfgLabs y
                   newDependsOnOld = Set.member x pcVars
-                  cleaned   =
+                  cleaned =
                     if newDependsOnOld
                       then cfgInfl
                       else Map.map (Set.delete x) cfgInfl
-                  newInfl   = Map.insert x pcVars cleaned
+                  newInfl = Map.insert x pcVars cleaned
                in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInput = vs, cfgInfl = newInfl, cfgPartials = newP}
 
 -- Reads at M#ch rather than M#(pc ⊔ ℓ_e). Legal because ch dominates the
@@ -396,10 +396,10 @@ stepInput mode lat cfg@Configuration {..} ch x =
 -- fails.
 stepOutput :: ExecMode -> SecurityLattice -> Configuration -> Level -> Expr -> Configuration
 stepOutput mode lat cfg@Configuration {..} ch e =
-  let v       = exprEval e (getMem cfgMem ch)
-      bottom  = head (latticeLevels lat)
-      l_e     = getExprLevel e cfgLabs bottom
-      pc      = getPCLevel cfgPCs
+  let v = exprEval e (getMem cfgMem ch)
+      bottom = head (latticeLevels lat)
+      l_e = getExprLevel e cfgLabs bottom
+      pc = getPCLevel cfgPCs
       monitorOn = mode == DynamicNSU || mode == DynamicPU
    in if monitorOn && not ((l_e \/ pc) <= ch)
         then
@@ -421,8 +421,8 @@ stepOutput mode lat cfg@Configuration {..} ch e =
 -- dependents.
 stepErase :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepErase mode lat cfg@Configuration {..} l_cmd x =
-  let pc      = getPCLevel cfgPCs
-      l_var   = cfgLabs x
+  let pc = getPCLevel cfgPCs
+      l_var = cfgLabs x
       nsuFail = not (pc <= l_var)
    in if mode == DynamicNSU && nsuFail
         then
@@ -438,7 +438,7 @@ stepErase mode lat cfg@Configuration {..} l_cmd x =
               ++ "; a conditional erase under a higher PC would be observable at lower levels."
         else
           let pcVars = getPCVars cfgPCs
-              deps   = getDependents x cfgInfl
+              deps = getDependents x cfgInfl
               (newMem, newLabs) =
                 Set.foldl
                   ( \(m, l) v ->
@@ -469,12 +469,12 @@ stepCall lat fns cfg@Configuration {..} x fName args =
   case filter (\f -> funcName f == fName) fns of
     [] -> error $ "Function " ++ fName ++ " not found"
     (f : _) ->
-      let pc       = getPCLevel cfgPCs
-          pcVars   = getPCVars cfgPCs
-          bottom   = head (latticeLevels lat)
-          l_args   = map (\e -> getExprLevel e cfgLabs bottom) args
-          argTgts  = map (pc \/) l_args
-          vals     = zipWith (\e l_t -> exprEval e (getMem cfgMem l_t)) args argTgts
+      let pc = getPCLevel cfgPCs
+          pcVars = getPCVars cfgPCs
+          bottom = head (latticeLevels lat)
+          l_args = map (\e -> getExprLevel e cfgLabs bottom) args
+          argTgts = map (pc \/) l_args
+          vals = zipWith (\e l_t -> exprEval e (getMem cfgMem l_t)) args argTgts
           emptyMem = Map.fromList [(lId l, \_ -> 0) | l <- latticeLevels lat]
           newMem =
             foldl
@@ -490,12 +490,12 @@ stepCall lat fns cfg@Configuration {..} x fName args =
               [(p, Set.union (varsExpr e) pcVars) | (p, e) <- zip (funcArgs f) args]
           frame = (x, cfgMem, cfgLabs, cfgPCs, funcReturn f, cfgInfl, calleeIntro, argToVars)
        in cfg
-            { cfgCmd   = Seq (funcBody f) Return
-            , cfgMem   = newMem
-            , cfgLabs  = newLabs
-            , cfgPCs   = [(pc, pcVars)]
-            , cfgStack = frame : cfgStack
-            , cfgInfl  = Map.empty
+            { cfgCmd = Seq (funcBody f) Return,
+              cfgMem = newMem,
+              cfgLabs = newLabs,
+              cfgPCs = [(pc, pcVars)],
+              cfgStack = frame : cfgStack,
+              cfgInfl = Map.empty
             }
 
 -- Under DynamicPU, callee-introduced P entries are dropped at the boundary;
@@ -505,16 +505,16 @@ stepReturn :: ExecMode -> SecurityLattice -> Configuration -> Configuration
 stepReturn mode lat cfg@Configuration {..} = case cfgStack of
   [] -> error "Return with empty call stack"
   (x, callerMem, callerLabs, callerPCs, retExpr, callerInfl, calleeIntro, argToVars) : restStack ->
-    let pc            = getPCLevel cfgPCs
-        pcVars        = getPCVars cfgPCs
-        callerPC      = getPCLevel callerPCs
-        callerPcVars  = getPCVars callerPCs
-        bottom        = head (latticeLevels lat)
-        l_ret         = getExprLevel retExpr cfgLabs bottom
-        l_target      = l_ret \/ pc \/ callerPC
-        v             = exprEval retExpr (getMem cfgMem l_target)
-        retSeed       = Set.union (varsExpr retExpr) pcVars
-        calleeTotal   = inflClosure retSeed cfgInfl
+    let pc = getPCLevel cfgPCs
+        pcVars = getPCVars cfgPCs
+        callerPC = getPCLevel callerPCs
+        callerPcVars = getPCVars callerPCs
+        bottom = head (latticeLevels lat)
+        l_ret = getExprLevel retExpr cfgLabs bottom
+        l_target = l_ret \/ pc \/ callerPC
+        v = exprEval retExpr (getMem cfgMem l_target)
+        retSeed = Set.union (varsExpr retExpr) pcVars
+        calleeTotal = inflClosure retSeed cfgInfl
         resolved =
           Set.unions
             [ case Map.lookup n argToVars of
@@ -522,7 +522,7 @@ stepReturn mode lat cfg@Configuration {..} = case cfgStack of
                 Nothing
                   | Set.member n calleeIntro -> Set.empty
                   | otherwise -> Set.singleton n
-            | n <- Set.toList calleeTotal
+              | n <- Set.toList calleeTotal
             ]
         -- Drop callee-introduced P entries: they have no meaning in the
         -- caller's namespace. Caller-side P entries survive unchanged.
@@ -531,9 +531,9 @@ stepReturn mode lat cfg@Configuration {..} = case cfgStack of
      in case applyNsu mode callerPC (callerLabs x) x carriers cleanedP "function return" of
           Left msg -> error msg
           Right newP ->
-            let finalMem    = updateMultiMemory lat callerMem x v l_target
+            let finalMem = updateMultiMemory lat callerMem x v l_target
                 finalLabs y = if y == x then l_target else callerLabs y
-                newXDeps    = Set.union resolved callerPcVars
+                newXDeps = Set.union resolved callerPcVars
                 newDependsOnOld = Set.member x newXDeps
                 cleanedCaller =
                   if newDependsOnOld
@@ -541,13 +541,13 @@ stepReturn mode lat cfg@Configuration {..} = case cfgStack of
                     else Map.map (Set.delete x) callerInfl
                 newCallerInfl = Map.insert x newXDeps cleanedCaller
              in cfg
-                  { cfgCmd      = Stop
-                  , cfgMem      = finalMem
-                  , cfgLabs     = finalLabs
-                  , cfgPCs      = callerPCs
-                  , cfgStack    = restStack
-                  , cfgInfl     = newCallerInfl
-                  , cfgPartials = newP
+                  { cfgCmd = Stop,
+                    cfgMem = finalMem,
+                    cfgLabs = finalLabs,
+                    cfgPCs = callerPCs,
+                    cfgStack = restStack,
+                    cfgInfl = newCallerInfl,
+                    cfgPartials = newP
                   }
 
 nsuMsg :: String -> VarName -> Level -> Level -> String
@@ -573,20 +573,20 @@ nsuMsg site x pc curLab =
 -- written to x (e.g. fv(e) ∪ pc_vars). When any of them is currently in P,
 -- x inherits the P flag; on a clean write under a flowing PC, x is removed
 -- from P (its old upgraded value is gone).
-applyNsu
-  :: ExecMode
-  -> Level
-  -> Level
-  -> VarName
-  -> Set.Set VarName
-  -> Partials
-  -> String
-  -> Either String Partials
+applyNsu ::
+  ExecMode ->
+  Level ->
+  Level ->
+  VarName ->
+  Set.Set VarName ->
+  Partials ->
+  String ->
+  Either String Partials
 applyNsu mode pc curLab x rhsCarriers p site =
-  let nsuFail   = not (pc <= curLab)
-      pFromRhs  = any (`Set.member` p) (Set.toList rhsCarriers)
-      addToP    = nsuFail || pFromRhs
-      p'        = if addToP then Set.insert x p else Set.delete x p
+  let nsuFail = not (pc <= curLab)
+      pFromRhs = any (`Set.member` p) (Set.toList rhsCarriers)
+      addToP = nsuFail || pFromRhs
+      p' = if addToP then Set.insert x p else Set.delete x p
    in if mode == DynamicNSU && nsuFail
         then Left (nsuMsg site x pc curLab)
         else Right p'
@@ -616,7 +616,6 @@ evalF n mode lat fns cfg =
   let cfg' = step mode lat fns cfg
       done = Finished (cfgMem cfg') (cfgLabs cfg') (cfgOutput cfg') (cfgInfl cfg') (cfgPartials cfg')
    in case cfgCmd cfg' of
-        Halt                        -> done
+        Halt -> done
         Stop | null (cfgStack cfg') -> done
-        _                           -> evalF (n - 1) mode lat fns cfg'
-
+        _ -> evalF (n - 1) mode lat fns cfg'

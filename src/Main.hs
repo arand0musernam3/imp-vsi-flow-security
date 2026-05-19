@@ -19,10 +19,10 @@ runCapture mode prog inputs = case parseImp prog of
   Left err -> error (show err)
   Right (Program lat fns mainCmd) ->
     let vars = getVars mainCmd
-        cfg  = initialConfig lat mainCmd inputs
+        cfg = initialConfig lat mainCmd inputs
      in case evalF 1000 mode lat fns cfg of
           Finished mm labs o infl p -> return (mm, labs, o, infl, p, lat, vars)
-          OutOfFuel                 -> error "OutOfFuel"
+          OutOfFuel -> error "OutOfFuel"
 
 -- Static type-check only; does not execute. TypeError is a returned value,
 -- not a thrown exception.
@@ -769,7 +769,19 @@ main = do
         staticTest
           "The environment of variable restarts (2)"
           "z := 1; input(top, a); input(high, a); if a then z := 0 else skip; output(low, z)"
-          ShouldFail
+          ShouldFail,
+        staticTest
+          "Top-vs-bot fallback: bot accepts a soundness gap (g indirectly calls leaky f)"
+          "def f() { input(high, s); output(low, s) } return 0; def g() { z := call f(); output(high, z) } return z; y := call g(); output(high, y)"
+          ShouldFail,
+        staticTest
+          "Top-vs-bot fallback: bot accepts a dead-branch reference to leaky f"
+          "def f() { input(high, s); output(low, s) } return 0; def g() { if 0 then r := call f() else r := 5; output(high, r) } return r; y := call g(); output(high, y)"
+          ShouldFail,
+        staticTest
+          "Top-vs-bot fallback: bot accepts a dead-branch reference to leaky f"
+          "def f() { input(high, s); output(low, s) } return 0; def g() { r := 5; output(high, r) } return r; y := call g(); output(high, y)"
+          ShouldPass
       ]
 
   -- TODO add more examples with custom lattices.
