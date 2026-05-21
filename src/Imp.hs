@@ -527,8 +527,7 @@ stepReturn mode lat cfg@Configuration {..} = case cfgStack of
         -- Drop callee-introduced P entries: they have no meaning in the
         -- caller's namespace. Caller-side P entries survive unchanged.
         cleanedP = Set.difference cfgPartials calleeIntro
-        carriers = Set.union resolved callerPcVars
-     in case applyNsu mode callerPC (callerLabs x) x carriers cleanedP "function return" of
+     in case applyNsu mode callerPC (callerLabs x) x resolved cleanedP "function return" of
           Left msg -> error msg
           Right newP ->
             let finalMem = updateMultiMemory lat callerMem x v l_target
