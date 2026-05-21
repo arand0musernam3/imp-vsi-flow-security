@@ -986,9 +986,6 @@ main = do
           True
       ]
 
-  -- TODO add more examples with custom lattices.
-  -- TODO refine how the output tape works, which channel is it reading from? Perhaps we should have separate tapes, one for each lattice level.
-
   let passed = length (filter id results)
       total = length results
   putStrLn ""
