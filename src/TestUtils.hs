@@ -34,14 +34,11 @@ import Types (TypeRes (..), cmdType, initEnv)
 data Expectation = ShouldPass | ShouldFail
   deriving (Eq, Show)
 
--- Outcome of running a program under one enforcement mode. The strings carry
--- the rejection/abort reason for display; only the constructor matters for
--- matching against predictions in `compareModes`.
 data ModeOutcome
-  = Accept String      -- successfully completed; carrier holds the output tape (or other detail)
+  = Accept String      -- successfully completed
   | Reject String      -- static type-checker rejected the program
-  | Abort String       -- dynamic monitor aborted (caught Haskell `error`)
-  | Stuck String       -- other failure (parse error, fuel exhausted, runtime error)
+  | Abort String       -- dynamic monitor aborted
+  | Stuck String       -- other failure
   deriving (Show)
 
 outcomeKind :: ModeOutcome -> String
@@ -59,8 +56,7 @@ outcomeDetail (Stuck d) = d
 sameKind :: ModeOutcome -> ModeOutcome -> Bool
 sameKind a b = outcomeKind a == outcomeKind b
 
--- Run a program silently; return the full execution state. Throws (via
--- Haskell `error`) on parse errors, fuel exhaustion, or monitor aborts.
+-- Run a program silently
 runCapture ::
   ExecMode ->
   String ->
@@ -75,8 +71,7 @@ runCapture mode prog inputs = case parseImp prog of
           Finished mm labs o infl p -> return (mm, labs, o, infl, p, lat, vars)
           OutOfFuel -> error "OutOfFuel"
 
--- Static type-check only; does not execute. TypeError is a returned value,
--- not a thrown exception.
+-- Static type-check only
 staticTest :: String -> String -> Expectation -> IO Bool
 staticTest name prog expected = do
   putStrLn ""
@@ -105,9 +100,7 @@ staticTest name prog expected = do
   where
     shortenS s = if length s > 250 then take 250 s ++ "..." else s
 
--- Run the program and compare what an observer at `observerName` sees.
--- An emission (ch, v) is visible to observer L iff ch ⊑ L. Same
--- semantics as the per-observer breakdown in printSecurityReport.
+-- Run the program and compare what an observer at, observerName sees
 runObserverTest ::
   String ->
   ExecMode ->
@@ -183,21 +176,8 @@ runTest name mode prog inputs expected showReport = do
   return passed
   where
     shorten s = if length s > 250 then take 250 s ++ "..." else s
-
-------------------------------------------------------------------
--- compareModes: side-by-side Static / NSU / PU evaluation of one
--- program. The caller passes a predicted triple; the result of each
--- mode is printed and matched against the prediction. Returns True
--- iff every observed outcome's *kind* matches the predicted kind.
-------------------------------------------------------------------
-
 compareModes ::
-  String -> -- example ID (e.g. "E1")
-  String -> -- short description
-  String -> -- program source
-  [Value] -> -- input tape
-  (ModeOutcome, ModeOutcome, ModeOutcome) -> -- predicted (Static, NSU, PU)
-  IO Bool
+  String -> String -> String -> [Value] -> (ModeOutcome, ModeOutcome, ModeOutcome) -> IO Bool
 compareModes ident desc prog inputs (predStatic, predNsu, predPu) = do
   putStrLn ""
   putStrLn (boldCyan ("== " ++ ident ++ " :: " ++ desc ++ " =="))

@@ -48,6 +48,16 @@ mkSecurityLattice names relations =
       levels = [L name i joins meets flows names | (name, i) <- zip names [0 ..]]
    in SecurityLattice levels
 
+liftLattice :: SecurityLattice -> SecurityLattice
+liftLattice lat =
+  let levels = latticeLevels lat
+      names = lAllNames (head levels)
+      n = length names
+      flows = lFlowsTable (head levels)
+      rels = [(names !! i, names !! j) | i <- [0 .. n - 1], j <- [0 .. n - 1], flows !! i !! j, i /= j]
+      newNames = names ++ ["top_err"]
+      newRels = rels ++ [(name, "top_err") | name <- names]
+   in mkSecurityLattice newNames newRels
 stdLatticeNames = ["bottom", "low", "high", "top"]
 
 stdLatticeRelations = [("bottom", "low"), ("low", "high"), ("high", "top")]
@@ -234,7 +244,7 @@ computeSummaries lat fns = verified
   where
     allLevels = latticeLevels lat
     bot = head allLevels
-    top = last allLevels
+    top_err = last allLevels
 
     argCombos f = combinations (length (funcArgs f))
     combinations 0 = [[]]
@@ -265,24 +275,16 @@ computeSummaries lat fns = verified
                   pcL <- allLevels,
                   let retL = case typeCheckBody current f argL pcL of
                         WellTyped envAfter _ -> exprType envAfter (funcReturn f)
-                        _ -> top
+                        _ -> top_err
               ]
        in if next == current then current else iterateAssumed next
 
     assumed = iterateAssumed initialAssumed
 
-    verified =
-      Map.fromList
-        [ ((funcName f, argL, pcL), retL)
-          | f <- fns,
-            argL <- argCombos f,
-            pcL <- allLevels,
-            WellTyped envAfter _ <- [typeCheckBody assumed f argL pcL],
-            let retL = exprType envAfter (funcReturn f)
-        ]
+    verified = Map.filter (/= top_err) assumed
 
 cmdType lat fns vars env pc cmd =
-  let summaries = computeSummaries lat fns
+  let summaries = computeSummaries (liftLattice lat) fns
       initialInfl = Map.empty
    in cmdType' fns summaries vars env (pc, Set.empty) initialInfl cmd
 
