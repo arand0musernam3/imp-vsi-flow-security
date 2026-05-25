@@ -131,7 +131,7 @@ cmdType' fns summaries vars env (pc, vars_pc_depends_on) infl cmd = case cmd of
     -- joined post-state until nothing changes. The lattice has finite
     -- height and assignment is monotone in both env and infl (labels
     -- only join up, dependency sets only union in), so termination is
-    -- bounded by O(height(lattice) × |vars|) iterations.
+    -- bounded garuenteed.
     let l = exprType env e
         pc' = pc \/ l
         vars_pc_depends_on' = Set.union vars_pc_depends_on (varsExpr e)
@@ -141,7 +141,7 @@ cmdType' fns summaries vars env (pc, vars_pc_depends_on) infl cmd = case cmd of
             WellTyped env_out infl_out ->
               let env_next = joinEnv env_in env_out
                   infl_next = Map.unionWith Set.union infl_in infl_out
-                  -- env_next ≥ env_in by construction; stability is
+                  -- env_next >= env_in by construction; stability is
                   -- the reverse direction (env_next ≤ env_in).
                   env_stable = envFlowsTo vars env_next env_in
                   infl_stable = infl_next == infl_in
@@ -218,7 +218,6 @@ cmdType' fns summaries vars env (pc, vars_pc_depends_on) infl cmd = case cmd of
                     ++ "; refusing the call."
   Return -> WellTyped env infl
   Stop -> WellTyped env infl
-  Halt -> WellTyped env infl
   -- ResetPC is inserted at runtime by step If; it never appears in
   -- parsed source, so the static type-checker never actually sees it.
   -- This case exists for exhaustiveness only.

@@ -117,7 +117,7 @@ runObserverTest name mode prog inputs observerName expected showReport = do
   putStrLn (dim (replicate 60 '-'))
   putStrLn $ "  mode:      " ++ show mode
   putStrLn $ "  inputs:    " ++ show inputs
-  putStrLn $ "  observer:  " ++ observerName ++ "   (filter: ch ⊑ observer)"
+  putStrLn $ "  observer:  " ++ observerName ++ "   (filter: ch flows to observer)"
   putStrLn $ "  expect:    visible = " ++ show expected
   putStrLn $ "  program:   " ++ prog
   result <-

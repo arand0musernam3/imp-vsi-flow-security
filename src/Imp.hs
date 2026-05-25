@@ -77,7 +77,6 @@ data Cmd
   | Call VarName String [Expr]
   | Return
   | Stop -- Internal: "this command has finished"; absorbed by Seq.
-  | Halt -- Internal: halts the entire program (not user-writable).
   | ResetPC -- Internal: pop the top of the PC stack on If/While exit.
   deriving (Eq, Show)
 
@@ -98,7 +97,6 @@ varsCmd (Erase _ x) = Set.singleton x
 varsCmd (Call x _ args) = Set.insert x (Set.unions (map varsExpr args))
 varsCmd Return = Set.empty
 varsCmd Stop = Set.empty
-varsCmd Halt = Set.empty
 varsCmd ResetPC = Set.empty
 
 getVars :: Cmd -> [VarName]
@@ -148,8 +146,8 @@ type Stack = [StackFrame]
 data Configuration = Configuration
   { cfgCmd :: Cmd, -- current command
     cfgMem :: MultiMemory, -- per-level memory views
-    cfgLabs :: Labels, -- dynamic label environment Γ
-    cfgPCs :: [PCContext], -- PC stack π
+    cfgLabs :: Labels, -- dynamic label environment gamma
+    cfgPCs :: [PCContext], -- PC stack pi
     cfgInput :: [Value], -- input tape In
     cfgOutput :: [(Level, Value)], -- output tape Out
     cfgStack :: Stack, -- call stack S
@@ -264,7 +262,6 @@ getDependents y infl =
 step :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Configuration
 step mode lat fns cfg = case cfgCmd cfg of
   Skip -> cfg {cfgCmd = Stop}
-  Halt -> cfg
   Stop -> error "impossible case"
   ResetPC -> stepResetPC cfg
   While e c -> cfg {cfgCmd = If e (Seq c (While e c)) Skip}
@@ -277,9 +274,7 @@ step mode lat fns cfg = case cfgCmd cfg of
   Call x fn args -> stepCall lat fns cfg x fn args
   Return -> stepReturn mode lat cfg
 
-------------------------------------------------------------------
--- Per-rule helpers
-------------------------------------------------------------------
+
 
 -- Pop the top PC frame on branch/loop exit.
 stepResetPC :: Configuration -> Configuration
@@ -287,25 +282,15 @@ stepResetPC cfg = case cfgPCs cfg of
   (_ : pcs) -> cfg {cfgCmd = Stop, cfgPCs = pcs}
   [] -> error "PC stack underflow"
 
--- TODO (PC stack growth): desugaring While into If with a recursive While in
--- the then-branch means each iteration's If pushes a new PC context BEFORE
--- the previous iteration's ResetPC can fire — the outer ResetPC sits past
--- the recursive While. The stack therefore grows by one frame per iteration
--- during execution and only unwinds when the loop finally terminates,
--- costing O(iterations) memory. Correctness is unaffected; a direct While
--- rule that reuses one PC frame per iteration would fix this.
 stepSeq :: ExecMode -> SecurityLattice -> [Function] -> Configuration -> Cmd -> Cmd -> Configuration
-stepSeq mode lat fns cfg c1 c2 = case c1 of
-  Halt -> cfg {cfgCmd = Halt}
-  _ ->
+stepSeq mode lat fns cfg c1 c2 = 
     let cfg' = step mode lat fns (cfg {cfgCmd = c1})
      in case cfgCmd cfg' of
           Stop -> cfg' {cfgCmd = c2}
-          Halt -> cfg' {cfgCmd = Halt}
           c1' -> cfg' {cfgCmd = Seq c1' c2}
 
 -- Under DynamicPU the deferred PU check fires here: if any variable read by
--- `e` is in P, abort.
+-- e is in P, abort.
 stepIf :: ExecMode -> SecurityLattice -> Configuration -> Expr -> Cmd -> Cmd -> Configuration
 stepIf mode lat cfg@Configuration {..} e c1 c2 =
   case puBranchViolation mode (varsExpr e) cfgPartials of
@@ -336,10 +321,7 @@ stepAssign mode lat cfg@Configuration {..} x e =
         Right newP ->
           let newMem = updateMultiMemory lat cfgMem x v l_target
               newLabs y = if y == x then l_target else cfgLabs y
-              -- Only drop x from other variables' deps when the new x is
-              -- independent of the old x (x ∉ closure of fv(e)). A reflexive
-              -- update like `x := x + 1` keeps x in the closure, so other
-              -- variables' references to x must stay.
+
               preClosure = inflClosure (varsExpr e) cfgInfl
               newDependsOnOld = Set.member x preClosure
               cleaned =
@@ -352,7 +334,6 @@ stepAssign mode lat cfg@Configuration {..} x e =
               newInfl = Map.insert x (Set.union depsClosure pcVars) cleaned
            in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
 
--- The side-channel check `pc ⊑ ch` is a flow check on the channel itself,
 -- not an NSU check; PU does NOT relax it.
 stepInput :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepInput mode lat cfg@Configuration {..} ch x =
@@ -391,9 +372,7 @@ stepInput mode lat cfg@Configuration {..} ch x =
                   newInfl = Map.insert x pcVars cleaned
                in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInput = vs, cfgInfl = newInfl, cfgPartials = newP}
 
--- Reads at M#ch rather than M#(pc ⊔ ℓ_e). Legal because ch dominates the
--- target view when the flow check passes, and the read never fires when it
--- fails.
+
 stepOutput :: ExecMode -> SecurityLattice -> Configuration -> Level -> Expr -> Configuration
 stepOutput mode lat cfg@Configuration {..} ch e =
   let v = exprEval e (getMem cfgMem ch)
@@ -408,17 +387,14 @@ stepOutput mode lat cfg@Configuration {..} ch e =
               ++ show ch
               ++ ". (ℓ_e="
               ++ show l_e
-              ++ ") ⊔ (PC="
+              ++ ") join (PC="
               ++ show pc
-              ++ ") ⋢ "
+              ++ ") does not flow to channel "
               ++ show ch
               ++ "."
         else cfg {cfgCmd = Stop, cfgOutput = cfgOutput ++ [(ch, v)]}
 
--- Under DynamicPU the NSU check is deferred: if `pc ⋢ Γ(x)` the erase is
--- allowed but every dependent enters P (its post-erase memory state at low
--- views reflects an upgrade decision). P also propagates from x to its
--- dependents.
+
 stepErase :: ExecMode -> SecurityLattice -> Configuration -> Level -> VarName -> Configuration
 stepErase mode lat cfg@Configuration {..} l_cmd x =
   let pc = getPCLevel cfgPCs
@@ -431,7 +407,7 @@ stepErase mode lat cfg@Configuration {..} l_cmd x =
               ++ x
               ++ ". PC ("
               ++ show pc
-              ++ ") ⋢ Γ("
+              ++ ") does not flow to gamma("
               ++ x
               ++ ") = "
               ++ show l_var
@@ -461,7 +437,7 @@ stepErase mode lat cfg@Configuration {..} l_cmd x =
                   else cfgPartials
            in cfg {cfgCmd = Stop, cfgMem = newMem, cfgLabs = newLabs, cfgInfl = newInfl, cfgPartials = newP}
 
--- Non-parameter locals start at the caller's pc rather than ⊥; without
+-- Non-parameter locals start at the caller's pc rather than bot; without
 -- this, any function body containing an assignment would be un-callable
 -- under a non-bottom pc (the first assignment would fail NSU).
 stepCall :: SecurityLattice -> [Function] -> Configuration -> VarName -> String -> [Expr] -> Configuration
@@ -563,15 +539,7 @@ nsuMsg site x pc curLab =
     ++ show curLab
     ++ "."
 
--- Decide an NSU-style write site (Assign / Input / Return). Encapsulates the
--- entire NSU-vs-PU policy difference for single-target writes:
---   * DynamicNSU + `pc ⋢ Γ(x)` → Left (abort message).
---   * DynamicPU + same       → Right (P ∪ {x}): allow, mark x as partial-leak.
---   * Otherwise               → Right (P updated by propagation from rhsCarriers).
--- `rhsCarriers` is the set of variables that fed the value about to be
--- written to x (e.g. fv(e) ∪ pc_vars). When any of them is currently in P,
--- x inherits the P flag; on a clean write under a flowing PC, x is removed
--- from P (its old upgraded value is gone).
+
 applyNsu ::
   ExecMode ->
   Level ->
@@ -615,6 +583,5 @@ evalF n mode lat fns cfg =
   let cfg' = step mode lat fns cfg
       done = Finished (cfgMem cfg') (cfgLabs cfg') (cfgOutput cfg') (cfgInfl cfg') (cfgPartials cfg')
    in case cfgCmd cfg' of
-        Halt -> done
         Stop | null (cfgStack cfg') -> done
         _ -> evalF (n - 1) mode lat fns cfg'
