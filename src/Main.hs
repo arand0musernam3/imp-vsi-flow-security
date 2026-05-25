@@ -18,85 +18,159 @@ main = do
 reportExamples :: IO ()
 reportExamples = do
   putStrLn ""
-  putStrLn (bold (replicate 60 '='))
-  putStrLn (bold "  Static vs Dynamic — worked examples (report)")
-  putStrLn (bold (replicate 60 '='))
+  putStrLn (bold (replicate 70 '='))
+  putStrLn (bold "  Static vs Dynamic NSU vs Dynamic PU — examples from the report")
+  putStrLn (bold (replicate 70 '='))
 
-  oks <-
+  putStrLn ""
+  putStrLn (boldYellow "### Worked examples (report §Comparison › Worked examples) ###")
+
+  worked <-
     sequence
-      [
-        compareModes
-          "E1"
-          "Dead branch with leak — static over-approximates"
-          "input(high, s); if 0 then output(low, s) else skip; output(low, 1)"
-          [42]
-          (Reject "", Accept "", Accept ""),
-        compareModes
-          "E2a"
-          "Branch on secret; safe input (s=0)"
-          "input(high, s); x := 7; if s then x := 7 else skip; output(low, x)"
-          [0]
-          (Reject "", Accept "", Accept ""),
-        compareModes
-          "E2b"
-          "Branch on secret; unsafe input (s=1) — NSU aborts at assign, PU at output"
-          "input(high, s); x := 7; if s then x := 7 else skip; output(low, x)"
-          [1]
+      [ compareModes
+          "Ex.1a"
+          "implicit flow, output(low, x) — all three styles reject/abort"
+          prog1a
+          [("high", 42)]
           (Reject "", Abort "", Abort ""),
         compareModes
-          "E3"
-          "Canonical PU win — upgrade only used at a dominating channel (s=1)"
-          "input(high, s); x := 0; if s then x := 1 else skip; output(high, x)"
-          [1]
+          "Ex.1b"
+          "implicit flow, output(high, x) — NSU over-rejects, static and PU accept"
+          prog1b
+          [("high", 42)]
           (Accept "", Abort "", Accept ""),
         compareModes
-          "E4"
-          "PU's deferred abort — branch on P-marked variable (s=1)"
-          "input(high, s); x := 0; if s then x := 1 else skip; if x then output(high, 1) else output(high, 0)"
-          [1]
+          "Ex.5"
+          "erase under high pc, output to high — PU win on erase"
+          prog5
+          [("high", 0), ("low", 7)]
+          (Accept "", Abort "", Accept ""),
+        compareModes
+          "Ex.10"
+          "deferred PU check fires at a later branch on a P-marked variable"
+          prog10
+          [("high", 1)]
           (Accept "", Abort "", Abort ""),
         compareModes
-          "E5a"
-          "Loop with secret condition — c=0 never enters the body"
-          "input(high, c); x := 5; while c do (x := x + 1; c := c - 1); output(low, x)"
-          [0]
-          (Reject "", Accept "", Accept ""),
-        compareModes
-          "E5b"
-          "Loop with secret condition — c=3 actually iterates"
-          "input(high, c); x := 5; while c do (x := x + 1; c := c - 1); output(low, x)"
-          [3]
+          "Ex.2"
+          "function leaks a high argument to a low channel — all three reject"
+          prog2
+          [("high", 42)]
           (Reject "", Abort "", Abort ""),
         compareModes
-          "E6"
-          "Direct leak — all three reject"
-          "input(high, s); output(low, s)"
-          [42]
-          (Reject "", Abort "", Abort ""),
-        compareModes
-          "E7"
-          "Input under high pc — channel check is not relaxed by PU"
-          "input(high, s); if s then input(low, x) else skip"
-          [1]
-          (Reject "", Abort "", Abort ""),
-        compareModes
-          "E8a"
-          "Function call — leaky path unreached at runtime (s=0)"
-          "def leak(a) { if a then output(low, a) else skip } return 0; input(high, s); x := call leak(s)"
-          [0]
-          (Reject "", Accept "", Accept ""),
-        compareModes
-          "E8b"
-          "Function call — leaky path reached at runtime (s=1)"
-          "def leak(a) { if a then output(low, a) else skip } return 0; input(high, s); x := call leak(s)"
-          [1]
+          "Ex.13"
+          "nested function call with a deep direct leak — all three reject"
+          prog13
+          [("high", 42)]
           (Reject "", Abort "", Abort "")
       ]
 
-  let passed = length (filter id oks)
-      total = length oks
   putStrLn ""
-  putStrLn (bold (replicate 60 '='))
+  putStrLn (boldYellow "### Exercises (report §Comparison › Exercises for the reader) ###")
+
+  exercises <-
+    sequence
+      [ compareModes
+          "Ex.3"
+          "incomparable lattice — direct flow between L1 and L2 is rejected"
+          prog3
+          [("L1", 7)]
+          (Reject "", Abort "", Abort ""),
+        compareModes
+          "Ex.4"
+          "overwrite kills label dependence — all three accept"
+          prog4
+          [("high", 99)]
+          (Accept "", Accept "", Accept ""),
+        compareModes
+          "Ex.7"
+          "snapshot v taken before re-input and erase — all three accept"
+          prog7
+          [("high", 1), ("high", 8)]
+          (Accept "", Accept "", Accept ""),
+        compareModes
+          "Ex.9"
+          "while-loop with secret guard — NSU aborts at first body write, PU accepts"
+          prog9
+          [("high", 3)]
+          (Accept "", Abort "", Accept ""),
+        compareModes
+          "Ex.8"
+          "function called inside a high branch, high target — all three accept"
+          prog8
+          [("high", 5)]
+          (Accept "", Accept "", Accept ""),
+        compareModes
+          "Ex.11"
+          "function return under high pc — NSU aborts at return-assign, PU accepts"
+          prog11
+          [("high", 1)]
+          (Accept "", Abort "", Accept ""),
+        compareModes
+          "Ex.12"
+          "erase after function leaves c at top — output(high) fails"
+          prog12
+          [("high", 1)]
+          (Reject "", Abort "", Abort "")
+      ]
+
+  let results = worked ++ exercises
+      passed = length (filter id results)
+      total = length results
+  putStrLn ""
+  putStrLn (bold (replicate 70 '='))
   let summaryColor = if passed == total then boldGreen else boldRed
   putStrLn $ summaryColor ("  Summary: " ++ show passed ++ "/" ++ show total ++ " examples matched their prediction")
-  putStrLn (bold (replicate 60 '='))
+  putStrLn (bold (replicate 70 '='))
+  where
+    prog1a =
+      "input(high, secret); x := 0; "
+        ++ "if secret then x := 1 else skip; "
+        ++ "output(low, x)"
+    prog1b =
+      "input(high, secret); x := 0; "
+        ++ "if secret then x := 1 else skip; "
+        ++ "output(high, x)"
+    prog2 =
+      "def f(a) { output(low, a) } return 0; "
+        ++ "input(high, secret); x := call f(secret)"
+    prog3 =
+      "lattice { Low < L1, Low < L2, L1 < High, L2 < High }; "
+        ++ "input(L1, x); output(L2, x)"
+    prog4 =
+      "input(high, y); z := y + 1; x := z; x := 7; output(bottom, x)"
+    prog5 =
+      "input(high, y); input(low, z); "
+        ++ "if y then skip else erase(high, z); "
+        ++ "output(high, z)"
+    prog7 =
+      "input(high, c); x := 5; v := x; input(high, x); "
+        ++ "if c then erase(top, x) else skip; "
+        ++ "output(low, v)"
+    prog8 =
+      "def f(a) { t := a; t := t + 1 } return t; "
+        ++ "input(high, s); y := s; "
+        ++ "if s then y := call f(s) else skip; "
+        ++ "output(high, y)"
+    prog9 =
+      "input(high, c); x := 0; y := 0; "
+        ++ "while c do (x := x + 1; y := y + x; c := c - 1); "
+        ++ "output(high, y); output(high, x)"
+    prog10 =
+      "input(high, secret); x := 0; "
+        ++ "if secret then x := 1 else skip; "
+        ++ "if x then output(high, 1) else output(high, 0)"
+    prog11 =
+      "def f(a) { skip } return a; "
+        ++ "input(high, secret); x := 0; "
+        ++ "if secret then x := call f(0) else skip; "
+        ++ "output(high, x)"
+    prog12 =
+      "def f() { c := 5 } return 0; "
+        ++ "input(high, c); "
+        ++ "if c then y := call f() else skip; "
+        ++ "erase(top, c); output(high, y)"
+    prog13 =
+      "def f() { input(high, s); output(low, s) } return 0; "
+        ++ "def g() { z := call f(); output(top, z) } return z; "
+        ++ "y := call g(); output(top, y)"
