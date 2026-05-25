@@ -20,11 +20,29 @@ boldGreen = color "\x1b[1;32m"
 boldCyan = color "\x1b[1;36m"
 boldYellow = color "\x1b[1;33m"
 
-runModeWithInput :: Bool -> ExecMode -> Program -> [Value] -> IO ()
+-- Resolve a channel name to its Level in the given lattice. Errors out
+-- with a clear message if the name is not present (rather than failing
+-- silently inside the monitor).
+resolveChannel :: SecurityLattice -> String -> Level
+resolveChannel lat name =
+  case filter (\l -> lName l == name) (latticeLevels lat) of
+    (l : _) -> l
+    [] ->
+      error $
+        "Input tape error: channel "
+          ++ name
+          ++ " is not a level in the lattice "
+          ++ show (map lName (latticeLevels lat))
+          ++ "."
+
+resolveInputs :: SecurityLattice -> [(String, Value)] -> [(Level, Value)]
+resolveInputs lat = map (\(ch, v) -> (resolveChannel lat ch, v))
+
+runModeWithInput :: Bool -> ExecMode -> Program -> [(String, Value)] -> IO ()
 runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
   putStrLn $ "AST: " ++ show prog
   let vars    = getVars p
-      cfg     = initialConfig lat p inputs
+      cfg     = initialConfig lat p (resolveInputs lat inputs)
       execute = runF 100 showReport mode lat fns vars cfg
 
   case mode of
@@ -38,7 +56,7 @@ runModeWithInput showReport mode prog@(Program lat fns p) inputs = do
       putStrLn (boldYellow "--- Mode: DYNAMIC MONITOR (PU) ---")
       execute
 
-runStringModeWithInput :: Bool -> ExecMode -> String -> [Value] -> IO ()
+runStringModeWithInput :: Bool -> ExecMode -> String -> [(String, Value)] -> IO ()
 runStringModeWithInput showReport mode s inputs = case parseImp s of
   Left err -> print err
   Right p -> runModeWithInput showReport mode p inputs

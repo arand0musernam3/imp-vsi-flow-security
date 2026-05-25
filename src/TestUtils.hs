@@ -25,6 +25,7 @@ import Examples
     boldYellow,
     dim,
     printSecurityReport,
+    resolveInputs,
     runStringModeWithInput,
   )
 import Imp
@@ -60,13 +61,13 @@ sameKind a b = outcomeKind a == outcomeKind b
 runCapture ::
   ExecMode ->
   String ->
-  [Value] ->
+  [(String, Value)] ->
   IO (MultiMemory, Labels, [(Level, Value)], Influences, Partials, SecurityLattice, [VarName])
 runCapture mode prog inputs = case parseImp prog of
   Left err -> error (show err)
   Right (Program lat fns mainCmd) ->
     let vars = getVars mainCmd
-        cfg = initialConfig lat mainCmd inputs
+        cfg = initialConfig lat mainCmd (resolveInputs lat inputs)
      in case evalF 1000 mode lat fns cfg of
           Finished mm labs o infl p -> return (mm, labs, o, infl, p, lat, vars)
           OutOfFuel -> error "OutOfFuel"
@@ -105,7 +106,7 @@ runObserverTest ::
   String ->
   ExecMode ->
   String ->
-  [Value] ->
+  [(String, Value)] ->
   String ->
   [Value] ->
   Bool ->
@@ -149,7 +150,7 @@ runObserverTest name mode prog inputs observerName expected showReport = do
   where
     shorten s = if length s > 250 then take 250 s ++ "..." else s
 
-runTest :: String -> ExecMode -> String -> [Value] -> Expectation -> Bool -> IO Bool
+runTest :: String -> ExecMode -> String -> [(String, Value)] -> Expectation -> Bool -> IO Bool
 runTest name mode prog inputs expected showReport = do
   putStrLn ""
   putStrLn (dim (replicate 60 '-'))
@@ -177,7 +178,7 @@ runTest name mode prog inputs expected showReport = do
   where
     shorten s = if length s > 250 then take 250 s ++ "..." else s
 compareModes ::
-  String -> String -> String -> [Value] -> (ModeOutcome, ModeOutcome, ModeOutcome) -> IO Bool
+  String -> String -> String -> [(String, Value)] -> (ModeOutcome, ModeOutcome, ModeOutcome) -> IO Bool
 compareModes ident desc prog inputs (predStatic, predNsu, predPu) = do
   putStrLn ""
   putStrLn (boldCyan ("== " ++ ident ++ " :: " ++ desc ++ " =="))
@@ -227,7 +228,7 @@ runStatic prog = case parseImp prog of
   where
     truncMsg s = if length s > 120 then take 120 s ++ "..." else s
 
-runMonitored :: ExecMode -> String -> [Value] -> IO ModeOutcome
+runMonitored :: ExecMode -> String -> [(String, Value)] -> IO ModeOutcome
 runMonitored mode prog inputs = do
   result <-
     try (runCapture mode prog inputs) ::

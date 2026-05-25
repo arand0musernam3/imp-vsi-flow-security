@@ -150,7 +150,7 @@ data Configuration = Configuration
     cfgMem :: MultiMemory, -- per-level memory views
     cfgLabs :: Labels, -- dynamic label environment Γ
     cfgPCs :: [PCContext], -- PC stack π
-    cfgInput :: [Value], -- input tape In
+    cfgInput :: [(Level, Value)], -- input tape In (channel-tagged)
     cfgOutput :: [(Level, Value)], -- output tape Out
     cfgStack :: Stack, -- call stack S
     cfgInfl :: Influences, -- influence map I
@@ -158,7 +158,7 @@ data Configuration = Configuration
   }
 
 -- Fresh configuration: every variable at ⊥, every memory view zero, empty P.
-initialConfig :: SecurityLattice -> Cmd -> [Value] -> Configuration
+initialConfig :: SecurityLattice -> Cmd -> [(Level, Value)] -> Configuration
 initialConfig lat c is =
   let bottom = head (latticeLevels lat)
    in Configuration
@@ -208,6 +208,19 @@ updateMultiMemory lat mm x v targetLevel =
     )
     mm
     (latticeLevels lat)
+
+-- Channel-tagged input lookup: return the value at the first tape entry
+-- whose channel is *exactly* the requested one (no flowing relation —
+-- strict equality), along with the tape with that entry removed.
+-- Inputs need not be in order: entries for other channels are skipped
+-- but kept in place.
+consumeFromChannel :: Level -> [(Level, Value)] -> Maybe (Value, [(Level, Value)])
+consumeFromChannel ch = go []
+  where
+    go _ [] = Nothing
+    go acc ((c, v) : rest)
+      | c == ch = Just (v, reverse acc ++ rest)
+      | otherwise = go ((c, v) : acc) rest
 
 -- Zero x at every view ⋡ targetLevel (i.e. strictly below or incomparable).
 eraseMultiMemory :: SecurityLattice -> MultiMemory -> VarName -> Level -> MultiMemory
@@ -372,15 +385,15 @@ stepInput mode lat cfg@Configuration {..} ch x =
               ++ "."
         else case applyNsu mode pc (cfgLabs x) x pcVars cfgPartials "input" of
           Left msg -> error msg
-          Right newP -> case cfgInput of
-            [] ->
+          Right newP -> case consumeFromChannel ch cfgInput of
+            Nothing ->
               error $
-                "Runtime error: input tape exhausted at input to "
-                  ++ x
-                  ++ " on channel "
+                "Runtime error: no input available on channel "
                   ++ show ch
+                  ++ " for input to "
+                  ++ x
                   ++ "."
-            (v : vs) ->
+            Just (v, vs) ->
               let newMem = updateMultiMemory lat cfgMem x v l_target
                   newLabs y = if y == x then l_target else cfgLabs y
                   newDependsOnOld = Set.member x pcVars
