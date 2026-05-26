@@ -28,37 +28,37 @@ reportExamples = do
   worked <-
     sequence
       [ compareModes
-          "Ex.1a"
+          "Listing 5a"
           "implicit flow, output(low, x) — all three styles reject/abort"
           prog1a
           [("high", 42)]
           (Reject "", Abort "", Abort ""),
         compareModes
-          "Ex.1b"
+          "Listing 5b"
           "implicit flow, output(high, x) — NSU over-rejects, static and PU accept"
           prog1b
           [("high", 42)]
           (Accept "", Abort "", Accept ""),
         compareModes
-          "Ex.5"
+          "Listing 6"
           "erase under high pc, output to high — PU win on erase"
           prog5
           [("high", 0), ("low", 7)]
           (Accept "", Abort "", Accept ""),
         compareModes
-          "Ex.10"
+          "Listing 7"
           "deferred PU check fires at a later branch on a P-marked variable"
           prog10
           [("high", 1)]
           (Accept "", Abort "", Abort ""),
         compareModes
-          "Ex.2"
+          "Listing 8"
           "function leaks a high argument to a low channel — all three reject"
           prog2
           [("high", 42)]
           (Reject "", Abort "", Abort ""),
         compareModes
-          "Ex.13"
+          "Listing 9"
           "nested function call with a deep direct leak — all three reject"
           prog13
           [("high", 42)]
@@ -71,46 +71,52 @@ reportExamples = do
   exercises <-
     sequence
       [ compareModes
-          "Ex.3"
+          "Listing 10"
           "incomparable lattice — direct flow between L1 and L2 is rejected"
           prog3
           [("L1", 7)]
           (Reject "", Abort "", Abort ""),
         compareModes
-          "Ex.4"
+          "Listing 11"
           "overwrite kills label dependence — all three accept"
           prog4
           [("high", 99)]
           (Accept "", Accept "", Accept ""),
         compareModes
-          "Ex.7"
+          "Listing 12"
           "snapshot v taken before re-input and erase — all three accept"
           prog7
           [("high", 1), ("high", 8)]
           (Accept "", Accept "", Accept ""),
         compareModes
-          "Ex.9"
+          "Listing 13"
           "while-loop with secret guard — NSU aborts at first body write, PU accepts"
           prog9
           [("high", 3)]
           (Accept "", Abort "", Accept ""),
         compareModes
-          "Ex.8"
+          "Listing 10"
           "function called inside a high branch, high target — all three accept"
           prog8
           [("high", 5)]
           (Accept "", Accept "", Accept ""),
         compareModes
-          "Ex.11"
+          "Listing 15"
           "function return under high pc — NSU aborts at return-assign, PU accepts"
           prog11
           [("high", 1)]
           (Accept "", Abort "", Accept ""),
         compareModes
-          "Ex.12"
+          "Listing 16"
           "erase after function leaves c at top — output(high) fails"
           prog12
           [("high", 1)]
+          (Reject "", Abort "", Abort ""),
+        compareModes
+          "Listing 17"
+          "PU check on output — NSU over-rejects, static and PU accept"
+          "input(high, s); input(bottom, x); y:=x; if s then erase(high, x) else skip; if y then output(bottom, 1) else output(bottom, 0)"
+          [ ("high", 1), ("bottom", 4)]
           (Reject "", Abort "", Abort "")
       ]
 

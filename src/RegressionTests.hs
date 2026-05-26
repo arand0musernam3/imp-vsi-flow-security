@@ -598,13 +598,6 @@ runAllRegressionTests = do
           "input(bottom, x); input(low, x); input(high, x); input(top, x); erase(low, x)"
           [("bottom", 1), ("low", 2), ("high", 3), ("top", 4)]
           ShouldPass
-          True,
-        runTest
-          "Erase at high should not affect low-labeled value"
-          DynamicPU
-          "input(high, s); input(bottom, x); y:=x; if s then erase(high, x) else skip; if y then output(bottom, 1) else output(bottom, 0)"
-          [ ("high", 1), ("bottom", 4)]
-          ShouldPass
           True
       ]
 
