@@ -376,6 +376,14 @@ runAllRegressionTests = do
           "high"
           [2]
           True,
+        runObserverTest
+          "Function with two parameters"
+          DynamicNSU
+          "def f(a,b) { t := a + b } return t; a := 3; b := 4; y := call f(a, b); output(high, y)"
+          []
+          "high"
+          [7]
+          True,
         runTest
           "Function locals at pc: body assigns under high caller pc"
           DynamicNSU
@@ -589,6 +597,13 @@ runAllRegressionTests = do
           DynamicPU
           "input(bottom, x); input(low, x); input(high, x); input(top, x); erase(low, x)"
           [("bottom", 1), ("low", 2), ("high", 3), ("top", 4)]
+          ShouldPass
+          True,
+        runTest
+          "Erase at high should not affect low-labeled value"
+          DynamicPU
+          "input(high, s); input(bottom, x); y:=x; if s then erase(high, x) else skip; if y then output(bottom, 1) else output(bottom, 0)"
+          [ ("high", 1), ("bottom", 4)]
           ShouldPass
           True
       ]
