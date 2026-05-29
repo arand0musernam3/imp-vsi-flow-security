@@ -117,6 +117,24 @@ reportExamples = do
           "PU check on output — NSU over-rejects, static and PU accept"
           "input(high, s); input(bottom, x); y:=x; if s then erase(high, x) else skip; if y then output(bottom, 1) else output(bottom, 0)"
           [ ("high", 1), ("bottom", 4)]
+          (Reject "", Abort "", Abort ""),
+        compareModes
+          "Test"
+          "Confidentiality and integrity test"
+          prog14
+          [ ("ST", 2)]
+          (Accept "", Accept "", Accept ""),
+        compareModes
+          "Test1"
+          "Confidentiality and integrity test1"
+          prog15
+          [ ("ST", 1), ("PU",2)]
+          (Reject "", Abort "", Abort ""),
+        compareModes
+          "Test2"
+          "Confidentiality and integrity test2"
+          prog16
+          [ ("ST", 1), ("PU",2)]
           (Reject "", Abort "", Abort "")
       ]
 
@@ -180,3 +198,12 @@ reportExamples = do
       "def f() { input(high, s); output(low, s) } return 0; "
         ++ "def g() { z := call f(); output(top, z) } return z; "
         ++ "y := call g(); output(top, y)"
+    prog14 =
+      "lattice { PT < PU, PT < ST, PU < SU, ST < SU };"
+      ++ "input(ST, password); data := password; output(SU, data)"
+    prog15 =
+      "lattice { PT < PU, PT < ST, PU < SU, ST < SU };"
+      ++ "input(PU, flag); input(ST, db_state); if flag then db_state := 1 + db_state else skip; output(PU, db_state)"
+    prog16 =
+      "lattice { PT < PU, PT < ST, PU < SU, ST < SU };"
+      ++ "input(PU, flag); input(ST, db_state); if flag then db_state := 1 + db_state else skip; output(ST, db_state)"

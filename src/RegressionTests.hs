@@ -12,7 +12,7 @@ runAllRegressionTests = do
 
   results <-
     sequence
-      [ runTest
+      [  runTest
           "NSU on assignment (branch taken, secret=1)"
           DynamicNSU
           "input(high, secret); x := 0; if secret then x := 1 else skip; output(low, x)"
@@ -593,12 +593,25 @@ runAllRegressionTests = do
           ShouldFail
           True,
         runTest
-          "testing"
+          "Confidentiality and integrity levels: write to a lower confidentiality channel, read from a higher integrity channel"
           DynamicPU
-          "input(bottom, x); input(low, x); input(high, x); input(top, x); erase(low, x)"
-          [("bottom", 1), ("low", 2), ("high", 3), ("top", 4)]
-          ShouldPass
+          "lattice { PT < PU, PT < ST, PU < SU, ST < SU }; input(PU, flag); input(ST, db_state); if flag then db_state := 1 + db_state else skip; output(PU, db_state)"
+          [("PU", 1), ("ST", 2)]
+          ShouldFail
           True
+          ,
+        runTest
+          "Confidentiality and integrity levels: write to a lower confidentiality channel, read from a higher integrity channel"
+          DynamicNSU
+          "lattice { PT < PU, PT < ST, PU < SU, ST < SU }; input(PU, flag); input(ST, db_state); if flag then db_state := 1 + db_state else skip; output(PU, db_state)"
+          [("PU", 1), ("ST", 2)]
+          ShouldFail
+          True
+          ,
+        staticTest
+          "Demo"
+          "def f(p) { x := call g(p) } return x; def g(q) { output(low, q) } return 0; input(high, s); if s then x := call f(2) else skip"
+          ShouldFail
       ]
 
   let passed = length (filter id results)
